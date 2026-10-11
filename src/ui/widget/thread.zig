@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const pch = @import("../../patch.zig");
 const evt = @import("../../event.zig");
+const notify = @import("../../notify.zig");
 const ui = @import("../../ui.zig");
 const widget = @import("../widget.zig");
 const xit = @import("xit");
@@ -931,18 +932,27 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                         try addToolButton(allocator, row, label, "", action);
                     }
 
-                    if (supports_conflicts and entryConflicted(entry)) {
+                    const conflicted = supports_conflicts and entryConflicted(entry);
+                    if (conflicted) {
                         const route = resolveRoute(self.data.identity, entry.id, "") orelse return error.RouteTooLong;
                         try addToolButton(allocator, row, "resolve conflict", "", try pa.print("a:{s}", .{try route.toUrl(self.session.page_arena)}));
-                    } else {
-                        if (has_status) {
-                            if (statusChange(entryStatus(entry))) |change| {
-                                const route = ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, entry.id, 0) orelse return error.RouteTooLong;
-                                row.getFocus().kind = .{ .custom = try pa.print("form:{s}/{s}", .{ try route.toUrl(self.session.page_arena), change.action }) };
-                                try addToolButton(allocator, row, change.action, "", "submit");
-                            }
+                    } else if (has_status) {
+                        if (statusChange(entryStatus(entry))) |change| {
+                            const route = ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, entry.id, 0) orelse return error.RouteTooLong;
+                            row.getFocus().kind = .{ .custom = try pa.print("form:{s}/{s}", .{ try route.toUrl(self.session.page_arena), change.action }) };
+                            try addToolButton(allocator, row, change.action, "", "submit");
                         }
+                    }
 
+                    if (entry.notify_action) |mode| {
+                        const route = ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, entry.id, 0) orelse return error.RouteTooLong;
+                        const action = try pa.print("{s}/{s}", .{ try route.toUrl(self.session.page_arena), @tagName(mode) });
+                        // a status change already made the row a form, which the button's own action overrides
+                        if (row.getFocus().kind != .custom) row.getFocus().kind = .{ .custom = try pa.print("form:{s}", .{action}) };
+                        try addToolButton(allocator, row, @tagName(mode), "", try pa.print("{s}{s}", .{ ui.submit_action_prefix, action }));
+                    }
+
+                    if (!conflicted) {
                         const route = ui.RoutablePage.repoThreadEditRoute(kind, self.data.identity, entry.id) orelse return error.RouteTooLong;
                         try addToolButton(allocator, row, "edit", "", try pa.print("a:{s}", .{try route.toUrl(self.session.page_arena)}));
                     }
@@ -1194,10 +1204,13 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
             const row = self.toolRow();
             const child_id = row.getFocus().child_id orelse return;
             const cur = row.children.getIndex(child_id) orelse return;
-            const on_primary = switch (row.children.values()[cur].widget.getFocus().kind) {
-                .custom => |action| std.mem.eql(u8, action, "submit"),
-                else => false,
+            const action: []const u8 = switch (row.children.values()[cur].widget.getFocus().kind) {
+                .custom => |custom| custom,
+                else => "",
             };
+            const on_primary = std.mem.eql(u8, action, "submit");
+            // the notify button is the row's only one with its own action
+            const on_notify = std.mem.startsWith(u8, action, ui.submit_action_prefix);
             switch (key) {
                 .arrow_left => {
                     var previous = cur;
@@ -1219,8 +1232,14 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                 },
                 .arrow_up => self.exit = .header,
                 .arrow_down => _ = self.moveVertical(root_focus, true),
-                .enter => if (on_primary) try self.primaryAction(allocator),
-                .mouse => |mouse| if (on_primary and inp.leftClickOn(root_focus, child_id, mouse)) try self.primaryAction(allocator),
+                .enter => if (on_primary) {
+                    try self.primaryAction(allocator);
+                } else if (on_notify) try self.changeNotify(allocator),
+                .mouse => |mouse| if (inp.leftClickOn(root_focus, child_id, mouse)) {
+                    if (on_primary) {
+                        try self.primaryAction(allocator);
+                    } else if (on_notify) try self.changeNotify(allocator);
+                },
                 else => {},
             }
         }
@@ -1661,6 +1680,29 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                         },
                     }
                 },
+            }
+            try self.session.navigate(ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, entry.id, 0) orelse return error.RouteTooLong);
+        }
+
+        // subscribe to the thread or mute it, as its button says
+        fn changeNotify(self: *This, allocator: std.mem.Allocator) !void {
+            if (comptime wasm) return;
+            const entry = self.entry orelse return;
+            const mode = entry.notify_action orelse return;
+            const io = self.session.io orelse return;
+            const users_dir = self.session.users_dir orelse return;
+            const source = self.data.repo_source orelse return;
+            const actor = (try self.session.authorize(self.data.identity, .read, null)) orelse return;
+            // a server actor always has both ids
+            const user_id = actor.user_id orelse unreachable;
+            const location: evt.RepoLocation = .{
+                .owner_id = actor.repo_user_id orelse unreachable,
+                .repo_id = try evt.parseEventId(std.Io.Dir.path.basename(source.path)),
+            };
+            const thread_id = try evt.parseEventId(entry.id);
+            switch (mode) {
+                .subscribe => try notify.subscribe(io, allocator, users_dir, &user_id, location, &thread_id, actor.author),
+                .mute => try notify.mute(io, allocator, users_dir, &user_id, location, &thread_id, actor.author),
             }
             try self.session.navigate(ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, entry.id, 0) orelse return error.RouteTooLong);
         }

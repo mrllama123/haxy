@@ -150,6 +150,8 @@ pub const PatchWithId = struct {
     assignees: []const ui.Assignee = &.{},
     // whether the viewer may change the thread, computed here so the web ui has it
     can_modify: bool = false,
+    // the viewer's notify button, null when hidden
+    notify_action: ?ui.NotifyAction = null,
     draft: bool = false,
     revision_oid: []const u8 = "",
     base_oid: []const u8 = "",
@@ -382,7 +384,10 @@ pub fn create(
 
 pub fn publishDraft(data: *const Self, session: *ui.Session, allocator: std.mem.Allocator, author: evt.CommitAuthor, id: []const u8) !void {
     const io = session.io orelse return error.NotFound;
-    const users_dir = session.users_dir orelse return error.NotFound;
+    const server = switch (session.eventHost()) {
+        .server => |server| server,
+        .local => return error.NotFound,
+    };
     const admin_repo = session.admin_repo orelse return error.NotFound;
     const repo_source = data.repo_source orelse return error.NotFound;
     const repo_id = data.repo_id orelse return error.NotFound;
@@ -393,7 +398,7 @@ pub fn publishDraft(data: *const Self, session: *ui.Session, allocator: std.mem.
     var target_repo = try rp.AnyRepo(.xit, .{}).open(io, allocator, repo_source.localInitOpts());
     defer target_repo.deinit(io, allocator);
     switch (target_repo) {
-        inline else => |*repo| try pch.publish(repo.self_repo_opts, io, allocator, users_dir, admin_repo, repo, .{
+        inline else => |*repo| try pch.publish(repo.self_repo_opts, io, allocator, server, admin_repo, repo, .{
             .id = id_hex,
             .user_id = user_id,
             .repo_id = repo_id,
@@ -405,7 +410,10 @@ pub fn publishDraft(data: *const Self, session: *ui.Session, allocator: std.mem.
 
 pub fn mergePatch(data: *const Self, session: *ui.Session, allocator: std.mem.Allocator, author: evt.CommitAuthor, id: []const u8, revision: evt.Patch.MergeRevision) !void {
     const io = session.io orelse return error.NotFound;
-    const users_dir = session.users_dir orelse return error.NotFound;
+    const server = switch (session.eventHost()) {
+        .server => |server| server,
+        .local => return error.NotFound,
+    };
     const repo_source = data.repo_source orelse return error.NotFound;
     if (repo_source.repo_kind != .xit) return error.NotFound;
     const patch_id = evt.parseEventId(id) catch return error.NotFound;
@@ -414,7 +422,7 @@ pub fn mergePatch(data: *const Self, session: *ui.Session, allocator: std.mem.Al
     var target_repo = try rp.AnyRepo(.xit, .{}).open(io, allocator, repo_source.localInitOpts());
     defer target_repo.deinit(io, allocator);
     switch (target_repo) {
-        inline else => |*repo| try pch.mergeAndRemoveFork(repo.self_repo_opts, io, allocator, users_dir, repo, .{
+        inline else => |*repo| try pch.mergeAndRemoveFork(repo.self_repo_opts, io, allocator, server, repo, .{
             .id = id_hex,
             .revision = revision,
             .author = author,

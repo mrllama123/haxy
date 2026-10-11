@@ -8,6 +8,7 @@ const serve_common = @import("./serve_common.zig");
 const ui = @import("./ui.zig");
 const fork = @import("./fork.zig");
 const pch = @import("./patch.zig");
+const notify = @import("./notify.zig");
 const xitui = xit.xitui;
 const wgt = xitui.widget;
 const Focus = xitui.focus.Focus;
@@ -43,6 +44,7 @@ pub const Host = union(evt.HostKind) {
     server: struct {
         admin_repo_path: []const u8,
         users_dir: []const u8,
+        dirty_repos: *notify.DirtyRepos,
         session_store: SessionStore,
         git_http_port: ?u16,
         git_ssh_port: ?u16,
@@ -53,7 +55,7 @@ pub const Host = union(evt.HostKind) {
     pub fn event(self: Host) evt.Host {
         return switch (self) {
             .local => .local,
-            .server => |server| .{ .server = .{ .users_dir = server.users_dir } },
+            .server => |server| .{ .server = .{ .users_dir = server.users_dir, .dirty_repos = server.dirty_repos, .admin_repo_path = server.admin_repo_path } },
         };
     }
 };
@@ -157,17 +159,17 @@ fn handleRequest(
         switch (host) {
             .server => |server| {
                 // "repo/new" and "user/new" come before "new", which would claim them
-                const PostRoute = enum { login, logout, @"repo/new", @"user/new", user, settings, grant, revoke, promote, demote, new, edit, remove, open, close, resolve, publish, merge, squash, attach, assign, unassign, undo, clear };
+                const PostRoute = enum { login, logout, @"repo/new", @"user/new", user, settings, grant, revoke, promote, demote, new, edit, remove, open, close, resolve, publish, merge, squash, attach, assign, unassign, subscribe, mute, undo, clear };
                 inline for (@typeInfo(PostRoute).@"enum".field_names) |name| {
                     const suffix = "/" ++ name;
                     if (std.mem.endsWith(u8, path, suffix)) {
                         const base = path[0 .. path.len - suffix.len];
                         return switch (@field(PostRoute, name)) {
                             .login => handleLogin(io, request, allocator, base, server.admin_repo_path, server.session_store),
-                            .logout => handleLogout(request, base, server.session_store),
+                            .logout => handleLogout(request, allocator, base, server.session_store),
                             .@"repo/new" => handleRepoNew(io, request, allocator, path, server.admin_repo_path, server.users_dir, server.session_store),
                             .@"user/new" => handleUserNew(io, request, allocator, path, server.admin_repo_path, server.users_dir, server.session_store),
-                            .user => handleUserSettings(io, request, allocator, path, server.admin_repo_path, server.users_dir, server.session_store),
+                            .user => handleUserSettings(io, request, allocator, base, server.admin_repo_path, server.users_dir, server.session_store),
                             .settings => handleRepoSettings(io, request, allocator, path, host),
                             .grant => handleRoles(io, request, allocator, base, host, .grant),
                             .revoke => handleRoles(io, request, allocator, base, host, .revoke),
@@ -187,6 +189,8 @@ fn handleRequest(
                             .attach => handleAttach(io, request, allocator, base, host),
                             .assign => handleAssign(io, request, allocator, base, host),
                             .unassign => handleUnassign(io, request, allocator, base, host),
+                            .subscribe => handleNotify(io, request, allocator, base, host, server.users_dir, .subscribe),
+                            .mute => handleNotify(io, request, allocator, base, host, server.users_dir, .mute),
                         };
                     }
                 }
@@ -390,10 +394,10 @@ fn handleLogin(
     const haxy_moment = try evt.currentMoment(evt.admin_repo_opts, &repo);
     const result = try evt.User.verifyCredentials(evt.AdminDB, evt.admin_repo_opts.hash, haxy_moment, &arena, username, password);
 
-    // on success, return to the page the login came from (base, or "/" at the
-    // root); on failure, stay on its user tab to surface the error.
-    const success_location: []const u8 = if (base.len == 0) "/" else base;
-    const failure_location = try arena.allocator().print("{s}/user", .{base});
+    // on success, return to the page whose user tab the login came from; on
+    // failure, stay on that tab to surface the error.
+    const success_location = try userTabPageRoot(&arena, base);
+    const failure_location = base;
 
     switch (result) {
         .success => |user_id| {
@@ -487,12 +491,20 @@ fn patchFeedback(failure: ui.Session.FormFeedback.PatchFailure, title: []const u
     } } };
 }
 
-fn handleLogout(request: *std.http.Server.Request, base: []const u8, session_store: SessionStore) !void {
+// the root of the page whose user tab route is `base`
+fn userTabPageRoot(arena: *std.heap.ArenaAllocator, base: []const u8) ![]const u8 {
+    const route = ui.RoutablePage.fromUrl(base) orelse return "/";
+    return route.pageRoot().toUrl(arena);
+}
+
+fn handleLogout(request: *std.http.Server.Request, allocator: std.mem.Allocator, base: []const u8, session_store: SessionStore) !void {
     // revoke the session server-side so the cookie is dead for anyone holding
     // a copy, not just this browser.
     if (getCookieValue(request, cookie_name)) |token| session_store.remove(token);
-    // return to the page the logout came from (base, or "/" at the root).
-    const location: []const u8 = if (base.len == 0) "/" else base;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    // return to the page whose user tab the logout came from
+    const location = try userTabPageRoot(&arena, base);
     // close the connection instead of keeping it alive: we don't read the
     // request body, and respond()'s keep-alive path would otherwise try to
     // discard it — which asserts on a bodyless POST that carries no
@@ -841,8 +853,8 @@ fn handleUserNew(
     });
 }
 
-// change the logged-in user's settings, then return to the page that posted
-// the form, which a failure also goes back to.
+// change the logged-in user's settings, then return to the settings tab that
+// posted the form, which a failure also goes back to.
 fn handleUserSettings(
     io: std.Io,
     request: *std.http.Server.Request,
@@ -1074,7 +1086,7 @@ fn handlePatchPublish(
     defer admin_repo.deinit(io, allocator);
     const id = std.fmt.bytesToHex(parts.thread_id, .lower);
     switch (target_repo) {
-        inline else => |*repo| try pch.publish(repo.self_repo_opts, io, allocator, server.users_dir, &admin_repo, repo, .{
+        inline else => |*repo| try pch.publish(repo.self_repo_opts, io, allocator, host.event().server, &admin_repo, repo, .{
             .id = id,
             .user_id = user_id,
             .repo_id = repo_id,
@@ -1098,7 +1110,7 @@ fn handlePatchMerge(
 ) !void {
     const parts = commentBaseParts(host, base) orelse return respondRemoveNotFound(request);
     if (parts.thread_kind != .patch or parts.comment_id != null) return respondRemoveNotFound(request);
-    const server = switch (host) {
+    const server = switch (host.event()) {
         .server => |server| server,
         .local => return respondRemoveNotFound(request),
     };
@@ -1113,7 +1125,7 @@ fn handlePatchMerge(
 
     const id = std.fmt.bytesToHex(parts.thread_id, .lower);
     const merged = switch (target_repo) {
-        inline else => |*repo| pch.mergeAndRemoveFork(repo.self_repo_opts, io, allocator, server.users_dir, repo, .{
+        inline else => |*repo| pch.mergeAndRemoveFork(repo.self_repo_opts, io, allocator, server, repo, .{
             .id = id,
             .revision = revision,
             .author = author,
@@ -1507,6 +1519,38 @@ fn handleUnassign(
         },
     }
     try request.respond("", .{ .status = .see_other, .keep_alive = false, .extra_headers = &.{.{ .name = "location", .value = thread_url }} });
+}
+
+// subscribe the logged-in user to the thread the url names, or mute it, then reload it
+fn handleNotify(
+    io: std.Io,
+    request: *std.http.Server.Request,
+    allocator: std.mem.Allocator,
+    base: []const u8,
+    host: Host,
+    users_dir: []const u8,
+    mode: ui.NotifyAction,
+) !void {
+    const parts = commentBaseParts(host, base) orelse return respondRemoveNotFound(request);
+    if (parts.comment_id != null) return respondRemoveNotFound(request);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const actor = (try authorizeWrite(io, allocator, &arena, request, host, parts.repo_base, .read, null)) orelse return;
+    const request_repo = (try requestRepoSource(io, allocator, host, parts.repo_base)) orelse return respondRemoveNotFound(request);
+    defer request_repo.deinit(allocator);
+    // a server actor always has both ids
+    const user_id = actor.user_id orelse unreachable;
+    const location: evt.RepoLocation = .{
+        .owner_id = actor.repo_user_id orelse unreachable,
+        .repo_id = evt.parseEventId(std.Io.Dir.path.basename(request_repo.source.path)) catch return respondRemoveNotFound(request),
+    };
+
+    switch (mode) {
+        .subscribe => try notify.subscribe(io, allocator, users_dir, &user_id, location, &parts.thread_id, actor.author),
+        .mute => try notify.mute(io, allocator, users_dir, &user_id, location, &parts.thread_id, actor.author),
+    }
+    try request.respond("", .{ .status = .see_other, .keep_alive = false, .extra_headers = &.{.{ .name = "location", .value = base }} });
 }
 
 // the name the upload declares for its file, percent-encoded so it survives a

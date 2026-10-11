@@ -628,7 +628,7 @@ fn testPushFork(
         try std.testing.expectError(error.NotFound, evt.currentMoment(repo_opts, &target));
         try std.testing.expectEqual(null, try (try target.core.latestMoment()).getCursor(hash.hashInt(hash_kind, evt.Patch.patch_id_to_mergeability_key)));
         try target.addBranch(io, .{ .name = "feature" });
-        try pch.publish(repo_opts, io, allocator, users_dir, &admin, &target, .{
+        try pch.publish(repo_opts, io, allocator, .{ .users_dir = users_dir }, &admin, &target, .{
             .id = fork_id_hex,
             .user_id = user_id,
             .repo_id = repo_id,

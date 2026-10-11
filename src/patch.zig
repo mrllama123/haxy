@@ -94,7 +94,7 @@ pub fn writeBranchPatch(
             const history = try DB.ArrayList(.read_write).init(repo.core.db.rootCursor());
             try history.appendContext(.{ .slot = try history.getSlot(-1) }, Ctx{ .repo = repo, .io = io, .arena = &arena, .id = id, .patch = patch, .expected_patch = expected_patch, .author = author, .checks = &checks, .first_parent = first_parent });
         }
-        if (host == .server) evt.bumpRepoActivityAt(io, allocator, host.server.users_dir, repo.core.work_path);
+        if (host == .server) evt.bumpRepoActivityAt(io, allocator, host.server, repo.core.work_path);
     }
 }
 
@@ -885,7 +885,7 @@ pub fn publish(
     comptime repo_opts: rp.RepoOpts(.xit),
     io: std.Io,
     allocator: std.mem.Allocator,
-    users_dir: []const u8,
+    server: evt.Host.Server,
     admin_repo: *rp.Repo(.xit, evt.admin_repo_opts),
     target_repo: *rp.Repo(.xit, repo_opts),
     input: PublishInput,
@@ -895,7 +895,7 @@ pub fn publish(
     defer arena.deinit();
 
     // validate the fork ownership and publishing identity
-    var user_repo = (try evt.openUserRepo(io, allocator, users_dir, &input.user_id)) orelse return error.InvalidPatchDraft;
+    var user_repo = (try evt.openUserRepo(io, allocator, server.users_dir, &input.user_id)) orelse return error.InvalidPatchDraft;
     defer user_repo.deinit(io, allocator);
     const admin_moment = try evt.currentMoment(evt.admin_repo_opts, admin_repo);
     const user_moment = (try evt.userMoment(&user_repo)) orelse return error.InvalidPatchDraft;
@@ -907,7 +907,7 @@ pub fn publish(
         !std.mem.eql(u8, user.event.email, input.author.email)) return error.InvalidPatchDraft;
 
     // read the patch staged in the fork
-    const fork_path = try fork.forkPath(arena.allocator(), users_dir, &input.user_id, &patch_id);
+    const fork_path = try fork.forkPath(arena.allocator(), server.users_dir, &input.user_id, &patch_id);
     var fork_repo = rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = fork_path }) catch return error.PatchDataUnavailable;
     defer fork_repo.deinit(io, allocator);
     const fork_moment = evt.currentMoment(repo_opts, &fork_repo) catch return error.PatchDataUnavailable;
@@ -998,10 +998,10 @@ pub fn publish(
                 else => |e| return e,
             };
         }
-        evt.bumpRepoActivityAt(io, allocator, users_dir, target_repo.core.work_path);
+        evt.bumpRepoActivityAt(io, allocator, server, target_repo.core.work_path);
 
         // remove the consumed draft from the fork
-        try evt.consume(.{ .server = .{ .users_dir = users_dir } }, .fork, .xit, repo_opts, io, allocator, &fork_repo, evt.events_ref, &.{.{
+        try evt.consume(.{ .server = server }, .fork, .xit, repo_opts, io, allocator, &fork_repo, evt.events_ref, &.{.{
             .id = input.id,
             .timestamp = input.timestamp,
             .author = input.author,
@@ -1013,7 +1013,7 @@ pub fn publish(
     if (fork_record.event.stage == .draft) {
         var published = fork_record.event;
         published.stage = .publish;
-        try evt.consume(.{ .server = .{ .users_dir = users_dir } }, .user, .xit, evt.user_repo_opts, io, allocator, &user_repo, evt.events_ref, &.{.{
+        try evt.consume(.{ .server = server }, .user, .xit, evt.user_repo_opts, io, allocator, &user_repo, evt.events_ref, &.{.{
             .id = input.id,
             .timestamp = input.timestamp,
             .author = input.author,
@@ -1083,14 +1083,14 @@ pub fn merge(
     comptime repo_opts: rp.RepoOpts(.xit),
     io: std.Io,
     allocator: std.mem.Allocator,
-    users_dir: []const u8,
+    server: evt.Host.Server,
     target_repo: *rp.Repo(.xit, repo_opts),
     input: MergeInput,
 ) !void {
     const patch_id = try evt.parseEventId(&input.id);
-    mergeInner(repo_opts, io, allocator, users_dir, target_repo, input, patch_id) catch |err| {
+    mergeInner(repo_opts, io, allocator, server, target_repo, input, patch_id) catch |err| {
         if (err == error.PatchDataUnavailable or err == error.PatchOutOfDate) {
-            refreshMergeability(repo_opts, io, allocator, target_repo, users_dir, patch_id);
+            refreshMergeability(repo_opts, io, allocator, target_repo, server.users_dir, patch_id);
         }
         return err;
     };
@@ -1100,7 +1100,7 @@ fn mergeInner(
     comptime repo_opts: rp.RepoOpts(.xit),
     io: std.Io,
     allocator: std.mem.Allocator,
-    users_dir: []const u8,
+    server: evt.Host.Server,
     target_repo: *rp.Repo(.xit, repo_opts),
     input: MergeInput,
     patch_id: [evt.event_id_size]u8,
@@ -1125,7 +1125,7 @@ fn mergeInner(
         var config = try target_repo.listConfig(io, allocator);
         defer config.deinit();
         const forker_id = (try fork.readForkerId(&config.sections, &patch_id)) orelse return error.PatchDataUnavailable;
-        const fork_path = try fork.forkPath(arena.allocator(), users_dir, &forker_id, &patch_id);
+        const fork_path = try fork.forkPath(arena.allocator(), server.users_dir, &forker_id, &patch_id);
         break :blk rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = fork_path, .require_repo_root = true }) catch return error.PatchDataUnavailable;
     };
     defer if (fork_repo_maybe) |*repo| repo.deinit(io, allocator);
@@ -1248,10 +1248,10 @@ fn mergeInner(
             .timestamp = input.timestamp,
         });
     }
-    evt.bumpRepoActivityAt(io, allocator, users_dir, target_repo.core.work_path);
+    evt.bumpRepoActivityAt(io, allocator, server, target_repo.core.work_path);
 
     // refresh other patches affected by the updated target branch.
-    refreshOpenMergeability(repo_opts, io, allocator, target_repo, users_dir, null, null);
+    refreshOpenMergeability(repo_opts, io, allocator, target_repo, server.users_dir, null, null);
 }
 
 // merge a published patch and remove its fork
@@ -1259,11 +1259,11 @@ pub fn mergeAndRemoveFork(
     comptime repo_opts: rp.RepoOpts(.xit),
     io: std.Io,
     allocator: std.mem.Allocator,
-    users_dir: []const u8,
+    server: evt.Host.Server,
     target_repo: *rp.Repo(.xit, repo_opts),
     input: MergeInput,
 ) !void {
-    try merge(repo_opts, io, allocator, users_dir, target_repo, input);
+    try merge(repo_opts, io, allocator, server, target_repo, input);
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
@@ -1277,7 +1277,7 @@ pub fn mergeAndRemoveFork(
         defer config.deinit();
         break :blk (try fork.readForkerId(&config.sections, &patch_id)) orelse return;
     };
-    try fork.remove(io, allocator, users_dir, &forker_id, &input.id, input.author);
+    try fork.remove(io, allocator, server.users_dir, &forker_id, &input.id, input.author);
 }
 
 fn commitAuthor(line: []const u8) !evt.CommitAuthor {

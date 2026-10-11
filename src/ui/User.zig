@@ -34,6 +34,7 @@ repos_search: ?[]const u8, // the name prefix the repos are narrowed to (decoded
 forks: []const ForkItem,
 forks_start: usize,
 forks_next_start: ?usize,
+user_notifications: ui.UserNotifications,
 quit: Quit,
 
 const Self = @This();
@@ -47,6 +48,7 @@ pub fn init(
     // the url-encoded repos search ("" = none)
     repos_search: []const u8,
     forks_start: usize,
+    user_tab: ui.RoutablePage.UserTab,
 ) !Self {
     // admin and user repos share one db type
     const DB = evt.AdminDB;
@@ -171,6 +173,7 @@ pub fn init(
         .forks = forks.items,
         .forks_start = forks_start,
         .forks_next_start = forks_next_start,
+        .user_notifications = try ui.UserNotifications.init(arena, session, user_tab),
         .quit = Quit.init(),
     };
 }
@@ -246,7 +249,8 @@ pub const View = struct {
             }
 
             {
-                var user_view = try ui.UserSettings.initView(allocator, session);
+                const route = ui.RoutablePage{ .user_user = .{ .name = ui.RoutablePage.Array(evt.User.name_max_len).from(data.user.name) orelse return error.RouteTooLong } };
+                var user_view = try ui.UserSettings.initView(allocator, session, &data.user_notifications, route);
                 errdefer user_view.deinit(allocator);
                 try stack.children.put(allocator, user_view.getFocus().id, user_view);
             }
@@ -315,6 +319,7 @@ pub const View = struct {
                                     .user_repos => |*v| return v.focusHeader(root_focus),
                                     // an empty list has nothing to focus
                                     .flow_box_scroll => |*v| if (v.isEmpty()) return,
+                                    .user_notifications => |*v| if (v.focusHeader(root_focus)) return,
                                     else => {},
                                 };
                                 index = stack_index;

@@ -24,6 +24,7 @@ files: Files,
 commits: Commits,
 patch: Patches,
 diff: Diff,
+user_notifications: ui.UserNotifications,
 quit: Quit,
 
 const Self = @This();
@@ -171,6 +172,7 @@ pub fn init(arena: *std.heap.ArenaAllocator, session: *ui.Session, route: ui.Rou
                     .path = diff_path,
                     .window = try Diff.render(.xit, repo_opts, io, arena.child_allocator, aa, fork_repo, if (diff_base) |*base| base else null, diff_head, diff_start, diff_path),
                 },
+                .user_notifications = try ui.UserNotifications.init(arena, session, route.userTab()),
                 .quit = Quit.init(),
             };
         },
@@ -226,7 +228,8 @@ pub const View = struct {
                 try stack.children.put(allocator, new_user.getFocus().id, .{ .new_user = new_user });
             }
             if (session.data.host_kind == .server) {
-                var user_view = try ui.UserSettings.initView(allocator, session);
+                const route = ui.RoutablePage.forkUserRoute(identity, data.header.id) orelse return error.RouteTooLong;
+                var user_view = try ui.UserSettings.initView(allocator, session, &data.user_notifications, route);
                 errdefer user_view.deinit(allocator);
                 try stack.children.put(allocator, user_view.getFocus().id, user_view);
             }
@@ -275,6 +278,7 @@ pub const View = struct {
                         .repo_patch_detail => |*view| if (view.focusFirst(root_focus)) return,
                         .repo_files => |*view| if (view.focusHeader(root_focus)) return,
                         .repo_commits => |*view| if (view.focusHeader(root_focus)) return,
+                        .user_notifications => |*view| if (view.focusHeader(root_focus)) return,
                         else => {},
                     };
                     next_index = stack_index;

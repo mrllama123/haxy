@@ -6,11 +6,13 @@ const mrg = xit.merge;
 const obj = xit.object;
 const rf = xit.ref;
 const pch = @import("patch.zig");
+const notify = @import("notify.zig");
 
 pub const User = @import("event/User.zig");
 pub const Repo = @import("event/Repo.zig");
 pub const Fork = @import("event/Fork.zig");
 pub const Grant = @import("event/Grant.zig");
+pub const Notify = @import("event/Notify.zig");
 pub const Discussion = @import("event/Discussion.zig");
 pub const Issue = @import("event/Issue.zig");
 pub const Comment = @import("event/Comment.zig");
@@ -137,13 +139,14 @@ pub fn bumpRepoActivity(
     };
 }
 
-// bump the repo at `repo_path` to now, logging rather than returning a failure
-pub fn bumpRepoActivityAt(io: std.Io, allocator: std.mem.Allocator, users_dir: []const u8, repo_path: []const u8) void {
-    const location = parseRepoPath(users_dir, repo_path) orelse return;
+// bump the repo at `repo_path` to now and queue it for notifying, logging rather than returning a failure
+pub fn bumpRepoActivityAt(io: std.Io, allocator: std.mem.Allocator, server: Host.Server, repo_path: []const u8) void {
+    const location = parseRepoPath(server.users_dir, repo_path) orelse return;
     const now: u64 = @intCast(std.Io.Timestamp.now(io, .real).toSeconds());
-    bumpRepoActivity(io, allocator, users_dir, &location.owner_id, &location.repo_id, now) catch |err| {
+    bumpRepoActivity(io, allocator, server.users_dir, &location.owner_id, &location.repo_id, now) catch |err| {
         std.log.warn("failed to record repo activity: {s}", .{@errorName(err)});
     };
+    if (server.dirty_repos) |dirty_repos| dirty_repos.mark(io, location);
 }
 
 fn readActivityTime(moment: UserDB.HashMap(.read_only), repo_id: *const [event_id_size]u8) !?u64 {
@@ -274,6 +277,7 @@ pub const EventKind = enum {
     repo,
     fork,
     grant,
+    notify,
     discuss,
     issue,
     comment,
@@ -293,7 +297,7 @@ pub const RepoRole = enum {
         return switch (self) {
             .admin => kind == .user,
             .user => switch (kind) {
-                .repo, .fork, .grant => true,
+                .repo, .fork, .grant, .notify => true,
                 else => false,
             },
             .repo => switch (kind) {
@@ -324,6 +328,7 @@ pub const Event = union(EventKind) {
     repo: ?Repo,
     fork: ?Fork,
     grant: ?Grant,
+    notify: ?Notify,
     discuss: ?Discussion,
     issue: ?Issue,
     comment: ?Comment,
@@ -361,6 +366,10 @@ pub const Host = union(HostKind) {
 
     pub const Server = struct {
         users_dir: []const u8,
+        // the notify worker's queue, null where no worker runs
+        dirty_repos: ?*notify.DirtyRepos = null,
+        // where repo writes resolve their participants to subscribe, null where they subscribe nobody
+        admin_repo_path: ?[]const u8 = null,
     };
 };
 
@@ -432,6 +441,12 @@ pub const EventWithId = struct {
                 .grant => .{
                     .grant = if (json_event.data) |value|
                         try std.json.parseFromValueLeaky(Grant, arena.allocator(), value, .{ .ignore_unknown_fields = true })
+                    else
+                        null,
+                },
+                .notify => .{
+                    .notify = if (json_event.data) |value|
+                        try std.json.parseFromValueLeaky(Notify, arena.allocator(), value, .{ .ignore_unknown_fields = true })
                     else
                         null,
                 },
@@ -522,6 +537,7 @@ pub fn remove(
         .repo => .{ .repo = null },
         .fork => .{ .fork = null },
         .grant => .{ .grant = null },
+        .notify => .{ .notify = null },
         .discuss => .{ .discuss = null },
         .issue => .{ .issue = null },
         .comment => .{ .comment = null },
@@ -679,7 +695,9 @@ pub fn consume(
     }
 
     if (role == .repo and host == .server and events.len > 0) {
-        bumpRepoActivityAt(io, allocator, host.server.users_dir, repo.core.work_path);
+        // before the bump queues the repo, so its worker round sees the new subscribers
+        notify.subscribeParticipants(io, allocator, host.server, repo.core.work_path, events);
+        bumpRepoActivityAt(io, allocator, host.server, repo.core.work_path);
     }
 }
 
@@ -1220,6 +1238,10 @@ pub fn consumeInTransaction(
                 .grant => |event_maybe| {
                     const record_maybe: ?Grant.Record = if (event_maybe) |event| .{ .event = event, .created_order = event_order, .updated_order = event_order } else null;
                     try Grant.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, record_maybe, &arena, &repo_event_oid);
+                },
+                .notify => |event_maybe| {
+                    const record_maybe: ?Notify.Record = if (event_maybe) |event| .{ .event = event, .created_order = event_order, .updated_order = event_order } else null;
+                    try Notify.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, record_maybe, &arena, &repo_event_oid);
                 },
                 .discuss => |event_maybe| {
                     const record_maybe: ?Discussion.Record = if (event_maybe) |event| .{
@@ -1927,7 +1949,7 @@ pub fn readAuthorEmail(
         .assign => Assignment.record_map_key,
         .patchrev => PatchRev.record_map_key,
         .patch => Patch.record_map_key,
-        .user, .repo, .fork, .grant => return null,
+        .user, .repo, .fork, .grant, .notify => return null,
     };
 
     const DB = EventDB(repo_opts.hash);

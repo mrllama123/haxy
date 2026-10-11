@@ -1,9 +1,11 @@
 const std = @import("std");
 const evt = @import("../event.zig");
 const pch = @import("../patch.zig");
+const notify = @import("../notify.zig");
 const ui = @import("../ui.zig");
 const xit = @import("xit");
 const rp = xit.repo;
+const hash = xit.hash;
 const xitui = xit.xitui;
 const wgt = xitui.widget;
 const layout = xitui.layout;
@@ -40,6 +42,7 @@ patches: Patches,
 events: Events,
 undo: ?Undo = null,
 settings: ?Settings = null,
+user_notifications: ui.UserNotifications,
 quit: Quit,
 
 const Self = @This();
@@ -229,6 +232,13 @@ pub fn init(
         .repo_roles => |r| r.start,
         else => 0,
     };
+    // the thread the route shows, whose notif viewing it reads
+    const viewed_thread: []const u8 = switch (route) {
+        .repo_issues => |*i| if (i.view == .conflicts) "" else i.selected.slice(),
+        .repo_patches => |*p| if (p.view == .conflicts) "" else p.selected.slice(),
+        .repo_discussions => |*t| t.selected.slice(),
+        else => "",
+    };
 
     // where the on-disk repo lives (null keeps the views' empty fallback), plus
     // the repo and owner-name metadata the header shows. local mode already
@@ -357,13 +367,23 @@ pub fn init(
                                 break :diff .{ .diff = try Diff.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, diff_route.repo_diff) };
                             } else .{ .commits = try Commits.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, session.haxy_moment, handle, ref_or_oid, ref_value, commits_message, base_oid, commits_search, commits_from) };
                             const target_branch = if (files_data.ref_or_oid == .branch) files_data.ref_or_oid_value else "";
+                            var discussions_data = try Discussions.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, discussions_label, discussions_search, discussions_selected, discussions_comment, discussions_comments_start, discussions_view, tabViewer(handle, repo, .discuss));
+                            var issues_data = try Issues.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, issues_label, issues_assignee, issues_search, issues_selected, issues_comment, issues_comments_start, issues_theirs, issues_view, tabViewer(handle, repo, .issue));
+                            var patches_data = try Patches.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, session, repo_id_maybe, repo_identity.identity, target_branch, patches_label, patches_search, patches_selected, patches_comment, patches_comments_start, patches_theirs, patches_view, tabViewer(handle, repo, .patch));
+                            if (repo_kind == .xit and session.data.host_kind == .server) {
+                                // a server page always resolved its repo id
+                                const repo_id = repo_id_maybe orelse unreachable;
+                                readNotify(opened.self_repo_opts, session, arena, opened, repo.event.user_id[0..evt.event_id_size], &repo_id, viewed_thread, &discussions_data, &issues_data, &patches_data) catch |err| {
+                                    std.log.warn("failed to read thread notifications: {s}", .{@errorName(err)});
+                                };
+                            }
                             break :blk .{
                                 files_data,
                                 changes_data,
                                 try Refs.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, repo_identity.identity, refs_kind, refs_from, refs_search),
-                                try Discussions.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, discussions_label, discussions_search, discussions_selected, discussions_comment, discussions_comments_start, discussions_view, tabViewer(handle, repo, .discuss)),
-                                try Issues.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, issues_label, issues_assignee, issues_search, issues_selected, issues_comment, issues_comments_start, issues_theirs, issues_view, tabViewer(handle, repo, .issue)),
-                                try Patches.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, session, repo_id_maybe, repo_identity.identity, target_branch, patches_label, patches_search, patches_selected, patches_comment, patches_comments_start, patches_theirs, patches_view, tabViewer(handle, repo, .patch)),
+                                discussions_data,
+                                issues_data,
+                                patches_data,
                                 try Events.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, repo.event, events_view, events_kind, events_selected, events_moment, session.local != null, session.data.sync_failure),
                             };
                         },
@@ -404,8 +424,73 @@ pub fn init(
         .events = events,
         .undo = undo_data,
         .settings = settings,
+        // after the shown thread's notif is marked read
+        .user_notifications = try ui.UserNotifications.init(arena, session, route.userTab()),
         .quit = Quit.init(),
     };
+}
+
+// set the viewer's notify button on every listed thread and mark the viewed thread's notif read
+fn readNotify(
+    comptime repo_opts: rp.RepoOpts(.xit),
+    session: *ui.Session,
+    arena: *std.heap.ArenaAllocator,
+    repo: *rp.Repo(.xit, repo_opts),
+    owner_id: *const [evt.event_id_size]u8,
+    repo_id: *const [evt.event_id_size]u8,
+    viewed_thread: []const u8,
+    discussions: *Discussions,
+    issues: *Issues,
+    patches: *Patches,
+) !void {
+    const user_id = session.userId() orelse return;
+    const io = session.io orelse return error.NoMoment;
+    const users_dir = session.users_dir orelse return error.NoMoment;
+    const gpa = arena.child_allocator;
+
+    {
+        // the owner's plain data, which holds the subscriber index
+        var owner_repo = (try evt.openUserRepo(io, gpa, users_dir, owner_id)) orelse return error.NotFound;
+        defer owner_repo.deinit(io, gpa);
+        const owner_moment = try notify.latestMoment(&owner_repo);
+
+        try setNotifyActions(arena, &discussions.recent, owner_moment, repo_id, &user_id);
+        for ([_]*Issues.Window{ &issues.open, &issues.closed, &issues.conflicts }) |window| try setNotifyActions(arena, window, owner_moment, repo_id, &user_id);
+        for ([_]*Patches.Window{ &patches.open, &patches.closed, &patches.merged, &patches.conflicts }) |window| try setNotifyActions(arena, window, owner_moment, repo_id, &user_id);
+    }
+
+    if (viewed_thread.len == 0) return;
+    var user_repo = (try evt.openUserRepo(io, gpa, users_dir, &user_id)) orelse return;
+    defer user_repo.deinit(io, gpa);
+    const latest = (try notify.latestMoment(&user_repo)) orelse return;
+    const notif_id = notify.idOf(repo_id, &try evt.parseEventId(viewed_thread));
+    const item = (try notify.readItem(latest, arena, &notif_id)) orelse return;
+    if (!item.unread) return;
+    // the page reads this moment or a newer one, so a child in it is shown
+    const moment = try evt.currentMoment(repo_opts, repo);
+    const kinds_cursor = try moment.getCursor(hash.hashInt(repo_opts.hash, evt.event_index_key)) orelse return error.CursorNotFound;
+    const kinds = try evt.EventDB(repo_opts.hash).HashMap(.read_only).init(kinds_cursor);
+    // a child the page can't show leaves it unread
+    if (try evt.readEventKind(repo_opts.hash, kinds, &item.notif.last_child_id) == null) return;
+    try notify.markRead(io, gpa, users_dir, &user_id, &notif_id, &item.notif.last_child_id);
+}
+
+// set the viewer's notify button on each of a window's threads
+fn setNotifyActions(
+    arena: *std.heap.ArenaAllocator,
+    window: anytype,
+    owner_moment: ?evt.UserDB.HashMap(.read_only),
+    repo_id: *const [evt.event_id_size]u8,
+    user_id: *const [evt.event_id_size]u8,
+) !void {
+    const items = try arena.allocator().dupe(std.meta.Elem(@TypeOf(window.items)), window.items);
+    for (items) |*entry| {
+        const thread_id = try evt.parseEventId(entry.id);
+        // muting drops the user from the index, so membership alone decides
+        const subscribed = if (owner_moment) |moment| try notify.isSubscribed(moment, &notify.idOf(repo_id, &thread_id), user_id) else false;
+        entry.notify_action = if (subscribed) .mute else .subscribe;
+    }
+    window.items = items;
 }
 
 // the viewer a tab's comment bar sees, which is none below the tab's role
@@ -520,7 +605,8 @@ pub const View = struct {
             }
 
             if (session.data.host_kind == .server) {
-                var user_view = try ui.UserSettings.initView(allocator, session);
+                const route = ui.RoutablePage{ .repo_user = .{ .name = ui.RoutablePage.Array(ui.RoutablePage.repo_route_max_len).from(identity) orelse return error.RouteTooLong } };
+                var user_view = try ui.UserSettings.initView(allocator, session, &data.user_notifications, route);
                 errdefer user_view.deinit(allocator);
                 try stack.children.put(allocator, user_view.getFocus().id, user_view);
             }
@@ -596,6 +682,7 @@ pub const View = struct {
                                     .repo_events => |*v| if (v.focusHeader(root_focus)) return,
                                     .repo_undo => |*v| if (v.focusHeader(root_focus)) return,
                                     .repo_settings => |*v| if (v.focusHeader(root_focus)) return,
+                                    .user_notifications => |*v| if (v.focusHeader(root_focus)) return,
                                     else => {},
                                 };
                                 index = stack_index;

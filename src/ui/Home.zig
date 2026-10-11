@@ -18,6 +18,7 @@ pub const Quit = @import("./Quit.zig");
 header: Header,
 about: About,
 users: Users,
+user_notifications: ui.UserNotifications,
 quit: Quit,
 
 const Self = @This();
@@ -28,12 +29,14 @@ pub fn init(
     haxy_moment: evt.AdminDB.HashMap(.read_only),
     // the users tab's window and search
     users_route: ui.RoutablePage.HomeUsersRoute,
+    user_tab: ui.RoutablePage.UserTab,
 ) !Self {
     const about = try About.init(arena, session);
     return .{
         .header = try Header.init(arena, about.title),
         .about = about,
         .users = try Users.init(arena, haxy_moment, users_route),
+        .user_notifications = try ui.UserNotifications.init(arena, session, user_tab),
         .quit = Quit.init(),
     };
 }
@@ -85,7 +88,7 @@ pub const View = struct {
             }
 
             {
-                var user_view = try ui.UserSettings.initView(allocator, session);
+                var user_view = try ui.UserSettings.initView(allocator, session, &data.user_notifications, .{ .home_user = .{} });
                 errdefer user_view.deinit(allocator);
                 try stack.children.put(allocator, user_view.getFocus().id, user_view);
             }
@@ -154,6 +157,7 @@ pub const View = struct {
                             .home_header => {
                                 if (stack.getSelected()) |selected_widget| switch (selected_widget.*) {
                                     .home_users => |*v| return v.focusHeader(root_focus),
+                                    .user_notifications => |*v| if (v.focusHeader(root_focus)) return,
                                     else => {},
                                 };
                                 index = stack_index;

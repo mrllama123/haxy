@@ -25,11 +25,12 @@ pub const View = struct {
     const password_index: usize = 1;
     const button_index: usize = 2;
 
-    pub fn init(allocator: std.mem.Allocator, session: *ui.Session) !View {
+    // the form posts under `route`, the page's user tab route
+    pub fn init(allocator: std.mem.Allocator, session: *ui.Session, route: ui.RoutablePage) !View {
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .round_corners = true, .direction = .vert });
         errdefer box.deinit(allocator);
         // marks this subtree as an HTML form scope for the web renderer
-        box.getFocus().kind = .{ .custom = "form:login" };
+        box.getFocus().kind = .{ .custom = try session.page_arena.allocator().print("form:{s}/login", .{try route.toUrl(session.page_arena)}) };
 
         var nav_ids: [3]usize = undefined;
 

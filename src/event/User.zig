@@ -191,14 +191,25 @@ pub fn readByEmail(
     arena: *std.heap.ArenaAllocator,
     email: []const u8,
 ) !?Public {
+    const user_id = (try readIdByEmail(DB, hash_kind, haxy_moment, email)) orelse return null;
+    const user_map = try userMap(DB, hash_kind, haxy_moment, &user_id) orelse return null;
+    const record = try evt.read(struct { event: Public }, DB, hash_kind, arena, user_map);
+    return record.event;
+}
+
+// a user's id via the email->user-id index
+pub fn readIdByEmail(
+    comptime DB: type,
+    comptime hash_kind: hash.HashKind,
+    haxy_moment: DB.HashMap(.read_only),
+    email: []const u8,
+) !?[evt.event_id_size]u8 {
     const email_to_user_id_cursor = (try haxy_moment.getCursor(hash.hashInt(hash_kind, email_to_user_id_key))) orelse return null;
     const email_to_user_id = try DB.HashMap(.read_only).init(email_to_user_id_cursor);
     const user_id_cursor = (try email_to_user_id.getCursor(hash.hashInt(hash_kind, email))) orelse return null;
     var user_id: [evt.event_id_size]u8 = undefined;
     _ = try user_id_cursor.readBytes(&user_id);
-    const user_map = try userMap(DB, hash_kind, haxy_moment, &user_id) orelse return null;
-    const record = try evt.read(struct { event: Public }, DB, hash_kind, arena, user_map);
-    return record.event;
+    return user_id;
 }
 
 // a user's id via the name->user-id index

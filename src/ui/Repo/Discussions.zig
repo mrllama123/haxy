@@ -28,6 +28,8 @@ pub const DiscussionWithId = struct {
     assignees: []const ui.Assignee = &.{},
     // whether the viewer may change the thread, computed here so the web ui has it
     can_modify: bool = false,
+    // the viewer's notify button, null when hidden
+    notify_action: ?ui.NotifyAction = null,
 };
 
 pub const Entry = DiscussionWithId;

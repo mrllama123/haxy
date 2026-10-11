@@ -76,6 +76,7 @@ pub const Widget = union(enum) {
     new_user: ui.NewUser.View,
     user_login: ui.UserLogin.View,
     user_settings: ui.UserSettings.View,
+    user_notifications: ui.UserNotifications.View,
     footer: Footer,
 
     pub fn deinit(self: *Widget, allocator: std.mem.Allocator) void {
@@ -117,8 +118,8 @@ pub const Widget = union(enum) {
     // whether moving up should return to the page header
     pub fn atTop(self: *Widget, root_focus: *Focus) bool {
         return switch (self.*) {
-            inline .home_about, .home_users, .user_repos, .flow_box_scroll, .new_repo, .new_user, .user_login, .user_settings, .quit, .repo_files, .repo_commits, .diff_view, .repo_refs, .repo_issues, .repo_patches, .repo_discussions, .repo_events, .repo_undo, .repo_settings, .repo_settings_form, .repo_roles => |*view| view.atTop(),
-            inline .repo_patch_detail => |*view| view.atTop(root_focus),
+            inline .home_about, .home_users, .user_repos, .flow_box_scroll, .new_repo, .new_user, .user_login, .user_notifications, .quit, .repo_files, .repo_commits, .diff_view, .repo_refs, .repo_issues, .repo_patches, .repo_discussions, .repo_events, .repo_undo, .repo_settings, .repo_settings_form, .repo_roles => |*view| view.atTop(),
+            inline .repo_patch_detail, .user_settings => |*view| view.atTop(root_focus),
             else => false,
         };
     }
@@ -382,8 +383,8 @@ pub const FlowBox = struct {
 
     // one flow item: its display text plus an optional link and bottom label. a
     // non-empty `link` sets the item's focus kind such as `.{ .custom = "a:/user/foo" }`,
-    // which the web renderer turns into an anchor.
-    pub const Item = struct { text: []const u8, link: []const u8 = "", bottom_label: []const u8 = "" };
+    // which the web renderer turns into an anchor. `bold` covers the text and the label.
+    pub const Item = struct { text: []const u8, link: []const u8 = "", bottom_label: []const u8 = "", bold: bool = false };
 
     // the text box copies the item text; links and bottom labels are copied into
     // the arena, so the caller's slices needn't outlive this call.
@@ -400,7 +401,8 @@ pub const FlowBox = struct {
         self.focus.child_id = null;
 
         for (items) |item| {
-            var text_box = try wgt.TextBox.init(allocator, item.text, .{ .border = .hidden, .round_corners = true, .wrap_kind = .word, .bottom_label = .{ .text = try aa.dupe(u8, item.bottom_label) } });
+            const style: Grid.Style = .{ .bold = item.bold };
+            var text_box = try wgt.TextBox.init(allocator, item.text, .{ .border = .hidden, .round_corners = true, .wrap_kind = .word, .bottom_label = .{ .text = try aa.dupe(u8, item.bottom_label), .style = style }, .style = style });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().mode = .all;
 

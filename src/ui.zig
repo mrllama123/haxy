@@ -18,6 +18,7 @@ const ansi_art = if (builtin.target.cpu.arch == .wasm32) struct {
     const not_found: []const u8 = "";
 } else @import("ansi_art");
 const evt = @import("./event.zig");
+const notify = @import("./notify.zig");
 const inp = @import("./ui/input.zig");
 
 pub const timestamp = @import("./ui/timestamp.zig");
@@ -34,6 +35,7 @@ pub const NotFound = @import("./ui/NotFound.zig");
 pub const NewRepo = @import("./ui/NewRepo.zig");
 pub const NewUser = @import("./ui/NewUser.zig");
 pub const UserSettings = @import("./ui/UserSettings.zig");
+pub const UserNotifications = @import("./ui/UserNotifications.zig");
 pub const UserLogin = @import("./ui/UserLogin.zig");
 pub const widget = @import("./ui/widget.zig");
 pub const Widget = widget.Widget;
@@ -87,13 +89,14 @@ pub const Page = union(PageKind) {
             .home => .{ .home = try Home.init(arena, session, session.haxy_moment orelse return error.NoMoment, switch (route) {
                 .home_users => |u| u,
                 else => .{},
-            }) },
+            }, route.userTab()) },
             .user => blk: {
                 const haxy_moment = session.haxy_moment orelse return error.NoMoment;
                 break :blk switch (route) {
-                    .user_repos => |u| .{ .user = try User.init(arena, session, haxy_moment, u.name, u.start, u.search.slice(), 0) },
-                    .user_forks => |u| .{ .user = try User.init(arena, session, haxy_moment, u.name, 0, "", u.start) },
-                    .user_repo_new, .user_user_new, .user_user => |name| .{ .user = try User.init(arena, session, haxy_moment, name, 0, "", 0) },
+                    .user_repos => |u| .{ .user = try User.init(arena, session, haxy_moment, u.name, u.start, u.search.slice(), 0, .{}) },
+                    .user_forks => |u| .{ .user = try User.init(arena, session, haxy_moment, u.name, 0, "", u.start, .{}) },
+                    .user_repo_new, .user_user_new => |name| .{ .user = try User.init(arena, session, haxy_moment, name, 0, "", 0, .{}) },
+                    .user_user => |u| .{ .user = try User.init(arena, session, haxy_moment, u.name, 0, "", 0, u.tab) },
                     else => return error.UnexpectedRoute,
                 };
             },
@@ -126,7 +129,7 @@ pub const RoutablePage = union(enum) {
     home_users: HomeUsersRoute,
     home_repo_new,
     home_user_new,
-    home_user,
+    home_user: UserTab,
     user_repos: struct {
         name: Array(evt.User.name_max_len),
         start: usize = 0,
@@ -136,7 +139,7 @@ pub const RoutablePage = union(enum) {
     user_forks: struct { name: Array(evt.User.name_max_len), start: usize = 0 },
     user_repo_new: Array(evt.User.name_max_len),
     user_user_new: Array(evt.User.name_max_len),
-    user_user: Array(evt.User.name_max_len),
+    user_user: struct { name: Array(evt.User.name_max_len), tab: UserTab = .{} },
     repo_files: RepoFilesRoute,
     repo_commits: RepoCommitsRoute,
     repo_diff: RepoDiffRoute,
@@ -197,14 +200,14 @@ pub const RoutablePage = union(enum) {
     repo_user_new: Array(repo_route_max_len),
     repo_settings: Array(repo_route_max_len),
     repo_roles: RepoRolesRoute,
-    repo_user: Array(repo_route_max_len),
+    repo_user: struct { name: Array(repo_route_max_len), tab: UserTab = .{} },
     fork_patch: ForkRoute,
     fork_diff: ForkDiffRoute,
     fork_files: ForkFilesRoute,
     fork_commits: ForkCommitsRoute,
     fork_repo_new: ForkRoute,
     fork_user_new: ForkRoute,
-    fork_user: ForkRoute,
+    fork_user: struct { fork: ForkRoute, tab: UserTab = .{} },
     not_found,
 
     pub const default: RoutablePage = .home_about;
@@ -218,6 +221,14 @@ pub const RoutablePage = union(enum) {
     pub const DiscussionsView = enum { recent, labels, new, edit, description, new_comment, edit_comment, remove };
 
     pub const EventsView = enum { active, removed };
+
+    pub const UserView = enum { notifications, settings };
+
+    // the user tab's sub tab and the notifications window it shows
+    pub const UserTab = struct {
+        view: UserView = .notifications,
+        start: usize = 0,
+    };
 
     pub const RefOrOid = enum {
         branch,
@@ -618,7 +629,27 @@ pub const RoutablePage = union(enum) {
     }
 
     pub fn forkUserRoute(identity: []const u8, id: []const u8) ?RoutablePage {
-        return .{ .fork_user = initForkRoute(identity, id) orelse return null };
+        return .{ .fork_user = .{ .fork = initForkRoute(identity, id) orelse return null } };
+    }
+
+    // the tab a user tab route names, the default for any other route
+    pub fn userTab(self: RoutablePage) UserTab {
+        return switch (self) {
+            .home_user => |tab| tab,
+            inline .user_user, .repo_user, .fork_user => |u| u.tab,
+            else => .{},
+        };
+    }
+
+    // a user tab route showing `tab` instead
+    pub fn withUserTab(self: RoutablePage, tab: UserTab) RoutablePage {
+        var route = self;
+        switch (route) {
+            .home_user => |*t| t.* = tab,
+            inline .user_user, .repo_user, .fork_user => |*u| u.tab = tab,
+            else => unreachable,
+        }
+        return route;
     }
 
     // build a `.repo_files` route (a null ref_kind = the bare default-branch
@@ -1087,7 +1118,7 @@ pub const RoutablePage = union(enum) {
             },
             .home_repo_new => "/" ++ home_segment ++ "/repo/new",
             .home_user_new => "/" ++ home_segment ++ "/user/new",
-            .home_user => "/" ++ home_segment ++ "/user",
+            .home_user => |tab| try userTabUrl(arena, "/" ++ home_segment, tab),
             .not_found => "/" ++ home_segment ++ "/not-found",
             .user_repos => |u| blk: {
                 var out: std.Io.Writer.Allocating = .init(arena.allocator());
@@ -1101,7 +1132,7 @@ pub const RoutablePage = union(enum) {
                 try arena.allocator().print("/{s}/forks/" ++ start_seg ++ "{d}", .{ u.name.slice(), u.start }),
             .user_repo_new => |name| try arena.allocator().print("/{s}/repo/new", .{name.slice()}),
             .user_user_new => |name| try arena.allocator().print("/{s}/user/new", .{name.slice()}),
-            .user_user => |name| try arena.allocator().print("/{s}/user", .{name.slice()}),
+            .user_user => |u| try userTabUrl(arena, try arena.allocator().print("/{s}", .{u.name.slice()}), u.tab),
             .repo_files => |f| blk: {
                 const prefix = try repoUrlPrefix(arena, f.name.slice());
                 if (f.ref_kind == null and f.patchrev_id.len == 0 and f.find.len == 0 and f.line == 0) break :blk if (prefix.len == 0) "/" else prefix;
@@ -1279,7 +1310,7 @@ pub const RoutablePage = union(enum) {
                 if (r.start != 0) try out.writer.print("/" ++ start_seg ++ "{d}", .{r.start});
                 break :blk out.written();
             },
-            .repo_user => |name| try arena.allocator().print("{s}/user", .{try repoUrlPrefix(arena, name.slice())}),
+            .repo_user => |u| try userTabUrl(arena, try repoUrlPrefix(arena, u.name.slice()), u.tab),
             .fork_patch => |f| try arena.allocator().print("/{s}+{s}", .{ f.name.slice(), f.id.slice() }),
             .fork_diff => |d| blk: {
                 var out: std.Io.Writer.Allocating = .init(arena.allocator());
@@ -1307,7 +1338,18 @@ pub const RoutablePage = union(enum) {
             },
             .fork_repo_new => |f| try arena.allocator().print("/{s}+{s}/repo/new", .{ f.name.slice(), f.id.slice() }),
             .fork_user_new => |f| try arena.allocator().print("/{s}+{s}/user/new", .{ f.name.slice(), f.id.slice() }),
-            .fork_user => |f| try arena.allocator().print("/{s}+{s}/user", .{ f.name.slice(), f.id.slice() }),
+            .fork_user => |u| try userTabUrl(arena, try arena.allocator().print("/{s}+{s}", .{ u.fork.name.slice(), u.fork.id.slice() }), u.tab),
+        };
+    }
+
+    // a user tab's url under its page's `prefix`
+    fn userTabUrl(arena: *std.heap.ArenaAllocator, prefix: []const u8, tab: UserTab) ![]const u8 {
+        return switch (tab.view) {
+            .settings => try arena.allocator().print("{s}/user/settings", .{prefix}),
+            .notifications => if (tab.start == 0)
+                try arena.allocator().print("{s}/user/notifications", .{prefix})
+            else
+                try arena.allocator().print("{s}/user/notifications/" ++ start_seg ++ "{d}", .{ prefix, tab.start }),
         };
     }
 
@@ -1355,7 +1397,10 @@ pub const RoutablePage = union(enum) {
                 return if (segments.rest().len == 0) forkCommitsRoute(identity, id, oid) else null;
             }
             if (std.mem.eql(u8, tab, "repo")) return if (isNewTail(&segments)) forkRepoNewRoute(identity, id) else null;
-            if (std.mem.eql(u8, tab, "user")) return if (segments.peek() == null) forkUserRoute(identity, id) else if (isNewTail(&segments)) forkUserNewRoute(identity, id) else null;
+            if (std.mem.eql(u8, tab, "user")) return switch (userTail(&segments) orelse return null) {
+                .new => forkUserNewRoute(identity, id),
+                .tab => |user_tab| (forkUserRoute(identity, id) orelse return null).withUserTab(user_tab),
+            };
             return null;
         }
         // "<username>:<reponame>[/<tab tail>]"; the bare pair is the files root
@@ -1366,7 +1411,7 @@ pub const RoutablePage = union(enum) {
             }
             return repoFilesRoute(first, null, "", "", 0);
         }
-        // "home[/users[/search:<s>][/start:<n>]|/repo/new|/user[/new]|/not-found]"
+        // "home[/users[/search:<s>][/start:<n>]|/repo/new|/user/<tail>|/not-found]"
         if (std.mem.eql(u8, first, home_segment)) {
             const sub = segments.next() orelse return default;
             if (std.mem.eql(u8, sub, "users")) {
@@ -1374,11 +1419,14 @@ pub const RoutablePage = union(enum) {
                 return withEncodedSearch(.{ .home_users = .{ .start = params.start() orelse return null } }, params.values.get(.search) orelse "");
             }
             if (std.mem.eql(u8, sub, "repo")) return if (isNewTail(&segments)) .home_repo_new else null;
-            if (std.mem.eql(u8, sub, "user")) return if (segments.peek() == null) .home_user else if (isNewTail(&segments)) .home_user_new else null;
+            if (std.mem.eql(u8, sub, "user")) return switch (userTail(&segments) orelse return null) {
+                .new => .home_user_new,
+                .tab => |user_tab| .{ .home_user = user_tab },
+            };
             if (std.mem.eql(u8, sub, "not-found")) return if (segments.peek() == null) .not_found else null;
             return null;
         }
-        // "<username>[/repos[/search:<s>][/start:<n>]|/forks|/repo/new|/user[/new]]"
+        // "<username>[/repos[/search:<s>][/start:<n>]|/forks|/repo/new|/user/<tail>]"
         evt.User.validateName(first) catch return null;
         const parsed = Array(evt.User.name_max_len).from(first) orelse return null;
         const sub = segments.next() orelse return .{ .user_repos = .{ .name = parsed } };
@@ -1388,7 +1436,10 @@ pub const RoutablePage = union(enum) {
         }
         if (std.mem.eql(u8, sub, "forks")) return .{ .user_forks = .{ .name = parsed, .start = listStart(&segments) orelse return null } };
         if (std.mem.eql(u8, sub, "repo")) return if (isNewTail(&segments)) .{ .user_repo_new = parsed } else null;
-        if (std.mem.eql(u8, sub, "user")) return if (segments.peek() == null) .{ .user_user = parsed } else if (isNewTail(&segments)) .{ .user_user_new = parsed } else null;
+        if (std.mem.eql(u8, sub, "user")) return switch (userTail(&segments) orelse return null) {
+            .new => .{ .user_user_new = parsed },
+            .tab => |user_tab| .{ .user_user = .{ .name = parsed, .tab = user_tab } },
+        };
         return null; // unknown sub-path
     }
 
@@ -1431,7 +1482,8 @@ pub const RoutablePage = union(enum) {
             .repo_events => |*e| e.name.slice(),
             .repo_undo => |*u| u.name.slice(),
             .repo_roles => |*r| r.name.slice(),
-            .repo_settings, .repo_repo_new, .repo_user_new, .repo_user => |*name| name.slice(),
+            .repo_user => |*u| u.name.slice(),
+            .repo_settings, .repo_repo_new, .repo_user_new => |*name| name.slice(),
             else => null,
         };
     }
@@ -1444,7 +1496,7 @@ pub const RoutablePage = union(enum) {
             .fork_commits => |*f| &f.fork,
             .fork_repo_new => |*f| f,
             .fork_user_new => |*f| f,
-            .fork_user => |*f| f,
+            .fork_user => |*u| &u.fork,
             else => null,
         };
     }
@@ -1457,7 +1509,8 @@ pub const RoutablePage = union(enum) {
             .user => switch (self) {
                 .user_repos => |u| .{ .user_repos = .{ .name = u.name } },
                 .user_forks => |u| .{ .user_repos = .{ .name = u.name } },
-                .user_repo_new, .user_user_new, .user_user => |name| .{ .user_repos = .{ .name = name } },
+                .user_repo_new, .user_user_new => |name| .{ .user_repos = .{ .name = name } },
+                .user_user => |u| .{ .user_repos = .{ .name = u.name } },
                 else => self,
             },
             // every repo route stores the same identity, so it always fits
@@ -1494,6 +1547,17 @@ pub const RoutablePage = union(enum) {
     fn isNewTail(segments: *std.mem.SplitIterator(u8, .scalar)) bool {
         const next = segments.next() orelse return false;
         return std.mem.eql(u8, next, "new") and segments.next() == null;
+    }
+
+    // the tail after a page's "user": none or "notifications" with an optional
+    // "start:<n>", "settings", or "new"
+    fn userTail(segments: *std.mem.SplitIterator(u8, .scalar)) ?union(enum) { new, tab: UserTab } {
+        const word = segments.next() orelse return .{ .tab = .{} };
+        if (std.mem.eql(u8, word, "new")) return if (segments.next() == null) .new else null;
+        return switch (std.meta.stringToEnum(UserView, word) orelse return null) {
+            .settings => if (segments.next() == null) .{ .tab = .{ .view = .settings } } else null,
+            .notifications => .{ .tab = .{ .start = listStart(segments) orelse return null } },
+        };
     }
 
     fn listStart(segments: *std.mem.SplitIterator(u8, .scalar)) ?usize {
@@ -1537,7 +1601,10 @@ pub const RoutablePage = union(enum) {
             }
             return if (isNewTail(&segments)) .{ .repo_repo_new = Array(repo_route_max_len).from(pair) orelse return null } else null;
         }
-        if (std.mem.eql(u8, tab, "user")) return if (segments.peek() == null) .{ .repo_user = Array(repo_route_max_len).from(pair) orelse return null } else if (isNewTail(&segments)) .{ .repo_user_new = Array(repo_route_max_len).from(pair) orelse return null } else null;
+        if (std.mem.eql(u8, tab, "user")) return switch (userTail(&segments) orelse return null) {
+            .new => .{ .repo_user_new = Array(repo_route_max_len).from(pair) orelse return null },
+            .tab => |user_tab| .{ .repo_user = .{ .name = Array(repo_route_max_len).from(pair) orelse return null, .tab = user_tab } },
+        };
         if (std.mem.eql(u8, tab, "refs")) {
             const word = params.scanTail(&segments) catch return null;
             if (word != null or !params.only(&.{ .branch, .tag, .search })) return null;
@@ -1790,11 +1857,12 @@ pub const RoutablePage = union(enum) {
         if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
         return switch (a) {
             .home_users => |a_u| a_u.start == b.home_users.start and std.mem.eql(u8, a_u.search.slice(), b.home_users.search.slice()),
+            .home_user => |a_t| std.meta.eql(a_t, b.home_user),
             .user_repos => |a_u| std.mem.eql(u8, a_u.name.slice(), b.user_repos.name.slice()) and a_u.start == b.user_repos.start and std.mem.eql(u8, a_u.search.slice(), b.user_repos.search.slice()),
             .user_forks => |a_u| std.mem.eql(u8, a_u.name.slice(), b.user_forks.name.slice()) and a_u.start == b.user_forks.start,
             .user_repo_new => |a_name| std.mem.eql(u8, a_name.slice(), b.user_repo_new.slice()),
             .user_user_new => |a_name| std.mem.eql(u8, a_name.slice(), b.user_user_new.slice()),
-            .user_user => |a_name| std.mem.eql(u8, a_name.slice(), b.user_user.slice()),
+            .user_user => |a_u| std.mem.eql(u8, a_u.name.slice(), b.user_user.name.slice()) and std.meta.eql(a_u.tab, b.user_user.tab),
             .repo_files => |a_f| std.mem.eql(u8, a_f.name.slice(), b.repo_files.name.slice()) and
                 a_f.ref_kind == b.repo_files.ref_kind and
                 std.mem.eql(u8, a_f.ref_value.slice(), b.repo_files.ref_value.slice()) and
@@ -1855,7 +1923,7 @@ pub const RoutablePage = union(enum) {
             .repo_roles => |a_r| std.mem.eql(u8, a_r.name.slice(), b.repo_roles.name.slice()) and
                 a_r.start == b.repo_roles.start and
                 std.mem.eql(u8, a_r.user.slice(), b.repo_roles.user.slice()),
-            .repo_user => |a_name| std.mem.eql(u8, a_name.slice(), b.repo_user.slice()),
+            .repo_user => |a_u| std.mem.eql(u8, a_u.name.slice(), b.repo_user.name.slice()) and std.meta.eql(a_u.tab, b.repo_user.tab),
             .fork_patch => |a_f| std.mem.eql(u8, a_f.name.slice(), b.fork_patch.name.slice()) and std.mem.eql(u8, a_f.id.slice(), b.fork_patch.id.slice()),
             .fork_diff => |a_d| std.mem.eql(u8, a_d.fork.name.slice(), b.fork_diff.fork.name.slice()) and
                 std.mem.eql(u8, a_d.fork.id.slice(), b.fork_diff.fork.id.slice()) and
@@ -1874,7 +1942,9 @@ pub const RoutablePage = union(enum) {
                 a_c.message == b.fork_commits.message,
             .fork_repo_new => |a_f| std.mem.eql(u8, a_f.name.slice(), b.fork_repo_new.name.slice()) and std.mem.eql(u8, a_f.id.slice(), b.fork_repo_new.id.slice()),
             .fork_user_new => |a_f| std.mem.eql(u8, a_f.name.slice(), b.fork_user_new.name.slice()) and std.mem.eql(u8, a_f.id.slice(), b.fork_user_new.id.slice()),
-            .fork_user => |a_f| std.mem.eql(u8, a_f.name.slice(), b.fork_user.name.slice()) and std.mem.eql(u8, a_f.id.slice(), b.fork_user.id.slice()),
+            .fork_user => |a_u| std.mem.eql(u8, a_u.fork.name.slice(), b.fork_user.fork.name.slice()) and
+                std.mem.eql(u8, a_u.fork.id.slice(), b.fork_user.fork.id.slice()) and
+                std.meta.eql(a_u.tab, b.fork_user.tab),
             else => true,
         };
     }
@@ -1906,6 +1976,10 @@ pub const RoutablePage = union(enum) {
                 .user_forks => |bb| std.mem.eql(u8, aa.name.slice(), bb.name.slice()) and aa.start != bb.start,
                 else => false,
             },
+            .user_user => |aa| switch (b) {
+                .user_user => |bb| std.mem.eql(u8, aa.name.slice(), bb.name.slice()) and !a.eql(b),
+                else => false,
+            },
             else => false,
         };
     }
@@ -1917,6 +1991,10 @@ pub const RoutablePage = union(enum) {
         return switch (a) {
             .home_users => switch (b) {
                 .home_users => !a.eql(b),
+                else => false,
+            },
+            .home_user => switch (b) {
+                .home_user => !a.eql(b),
                 else => false,
             },
             else => false,
@@ -2093,6 +2171,9 @@ pub const RepoSource = struct {
 };
 
 // who a write acts as and the role they hold in its repo
+// the thread button that changes the viewer's notifications, named by its label
+pub const NotifyAction = enum { subscribe, mute };
+
 pub const Actor = struct {
     author: evt.CommitAuthor,
     // local mode has no accounts, so it has no user id
@@ -2221,6 +2302,8 @@ pub const Session = struct {
     io: ?std.Io = null,
     admin_repo: ?*rp.Repo(.xit, evt.admin_repo_opts) = null,
     users_dir: ?[]const u8 = null,
+    // the notify worker's queue, null where no worker runs
+    dirty_repos: ?*notify.DirtyRepos = null,
     // the single on-disk repo this session views, when running in local mode
     // (haxy invoked with no arguments inside a repo). null on the server paths,
     // which resolve repos from the admin db instead.
@@ -2401,6 +2484,8 @@ pub const Session = struct {
         // the logged-in user's name and email, for the views that show them
         user_name: ?[]const u8 = null,
         user_email: ?[]const u8 = null,
+        // the logged-in user's unread notifications, refreshed on each page build
+        unread_notifs: u64 = 0,
         // a failed form retained long enough to render it for correction
         form_feedback: ?FormFeedback = null,
         // a transient local event-sync error
@@ -2507,11 +2592,15 @@ pub const Session = struct {
         };
     }
 
-    // where this session's event writes go. a server session always has a users dir
+    // where this session's event writes go. a server session always has a users dir and an admin repo
     pub fn eventHost(self: *const Self) evt.Host {
         return switch (self.data.host_kind) {
             .local => .local,
-            .server => .{ .server = .{ .users_dir = self.users_dir orelse unreachable } },
+            .server => .{ .server = .{
+                .users_dir = self.users_dir orelse unreachable,
+                .dirty_repos = self.dirty_repos,
+                .admin_repo_path = (self.admin_repo orelse unreachable).core.work_path,
+            } },
         };
     }
 

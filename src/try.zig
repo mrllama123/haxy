@@ -19,6 +19,7 @@ const srch_cmmt = hx.search_commit;
 const fork = hx.fork;
 const pch = hx.pch;
 const push = hx.push;
+const notify = hx.notify;
 
 // cook the terminal before a panic/segfault trace is printed, so the trace
 // isn't mangled by raw mode and the alternate buffer
@@ -291,6 +292,8 @@ pub fn main(init: std.process.Init) !void {
         // template repo and copy that to each repo's location below rather than
         // redoing the expensive commit work for every repo.
         const template_path = try std.Io.Dir.path.join(arena.allocator(), &.{ cwd_path, temp_dir_name, "template" });
+        // the threads admin takes part in: its discussion, its assigned issue and its newest patch
+        var admin_thread_ids: [3][evt.event_id_size]u8 = undefined;
         {
             var template_repo = try rp.Repo(.xit, .{}).init(io, allocator, .{ .path = template_path });
             defer template_repo.deinit(io, allocator);
@@ -812,6 +815,18 @@ pub fn main(init: std.process.Init) !void {
             }
             try evt.consume(.local, .repo, .xit, .{}, io, allocator, &template_repo, evt.events_ref, &assignment_events);
 
+            // a comment on admin's assigned issue, which notifies admin as its assignee
+            {
+                const thread_id = issue_events[issue_data.len - 5].id;
+                admin_thread_ids[1] = try evt.parseEventId(&thread_id);
+                try evt.consume(.local, .repo, .xit, .{}, io, allocator, &template_repo, evt.events_ref, &.{.{
+                    .id = std.fmt.bytesToHex(evt.EventWithId.randomId(prng.random()), .lower),
+                    .timestamp = now - 15 * std.time.s_per_min,
+                    .author = .{ .name = user_data[3].name, .email = user_data[3].email },
+                    .event = .{ .comment = .{ .thread_id = thread_id, .parent_id = thread_id, .body = "Is this still on your list? I can pick it up if you're busy." } },
+                }});
+            }
+
             const discussion_data = [_]struct {
                 title: []const u8,
                 description: []const u8,
@@ -858,6 +873,7 @@ pub fn main(init: std.process.Init) !void {
                 };
             }
             try evt.consume(.local, .repo, .xit, .{}, io, allocator, &template_repo, evt.events_ref, &discussion_events);
+            admin_thread_ids[0] = try evt.parseEventId(&discussion_events[0].id);
 
             var discussion_comment_ids: [discussion_data.len][3][evt.event_id_size]u8 = undefined;
             for (&discussion_comment_ids) |*ids| {
@@ -921,9 +937,20 @@ pub fn main(init: std.process.Init) !void {
                 if (repo_index + 1 == repo_data.len) {
                     var target_repo = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = repo_path, .require_repo_root = true });
                     defer target_repo.deinit(io, allocator);
-                    try seedPatches(io, allocator, server_path, &repo, &target_repo, &repo_event_ids[repo_index], &user_ids[repo_data[repo_index].user_index], &admin_user_id, prng.random(), now);
+                    admin_thread_ids[2] = try seedPatches(io, allocator, server_path, &repo, &target_repo, &repo_event_ids[repo_index], &user_ids[repo_data[repo_index].user_index], &admin_user_id, prng.random(), now);
                 }
             }
+        }
+
+        // seeding consumed locally, which subscribes nobody, so subscribe admin as the server
+        // would have, then deliver the notifications of its own repos the way the worker does
+        for (repo_data, repo_event_ids, 0..) |r, id_bytes, repo_index| {
+            if (r.user_index != 0) continue;
+            const location: evt.RepoLocation = .{ .owner_id = user_ids[r.user_index], .repo_id = id_bytes };
+            // only the last repo has patches
+            const thread_ids: []const [evt.event_id_size]u8 = if (repo_index + 1 == repo_data.len) &admin_thread_ids else admin_thread_ids[0..2];
+            for (thread_ids) |*thread_id| try notify.subscribe(io, allocator, users_dir, &admin_user_id, location, thread_id, .{ .name = user_data[0].name, .email = user_data[0].email });
+            try notify.notifyRepo(io, allocator, users_dir, work_path, location);
         }
 
         break :blk try ui.Session.init(&session_arena, &repo, .{ .user_id = &admin_user_id });
@@ -1199,6 +1226,7 @@ fn seedPatchRevision(
     }});
 }
 
+// returns the newest patch, the one the seeded comments are on
 fn seedPatches(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -1210,7 +1238,7 @@ fn seedPatches(
     user_id: *const [evt.event_id_size]u8,
     random: std.Random,
     now: u64,
-) !void {
+) ![evt.event_id_size]u8 {
     const patch_data = [_]struct {
         title: []const u8,
         description: []const u8,
@@ -1321,7 +1349,7 @@ fn seedPatches(
             try seedPatchRevision(io, allocator, users_dir, user_id, &patch_ids[i], patch.title, patch_author, timestamp + 1, random, base_oid, file_path, contents[0..count], patch.removed_path);
         }
         const status = patch.status orelse continue;
-        try pch.publish(.{}, io, allocator, users_dir, admin_repo, target_repo, .{
+        try pch.publish(.{}, io, allocator, .{ .users_dir = users_dir }, admin_repo, target_repo, .{
             .id = patch_hex,
             .user_id = user_id.*,
             .repo_id = repo_id.*,
@@ -1330,7 +1358,7 @@ fn seedPatches(
         });
 
         if (status == .merged) {
-            try pch.mergeAndRemoveFork(.{}, io, allocator, users_dir, target_repo, .{
+            try pch.mergeAndRemoveFork(.{}, io, allocator, .{ .users_dir = users_dir }, target_repo, .{
                 .id = patch_hex,
                 .revision = .source,
                 .author = patch_author,
@@ -1450,6 +1478,7 @@ fn seedPatches(
     // action and the patch refresh it sets off
     try seedPush(io, allocator, target_repo, users_dir, patch_author, now - 15);
     try pch.refreshBranches(.{ .server = .{ .users_dir = users_dir } }, .xit, .{}, io, allocator, target_repo, null, null);
+    return patch_ids[patch_ids.len - 1];
 }
 
 // stand in for a client push, which the fixture has no server to receive: one

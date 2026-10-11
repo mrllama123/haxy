@@ -173,7 +173,7 @@ pub const View = struct {
         const new_repo_link = try ui.inPageTabLink(session, new_repo_route, current_tag == .repo_repo_new);
         const new_user_route = ui.RoutablePage{ .repo_user_new = Array.from(identity) orelse return error.RouteTooLong };
         const new_user_link = try ui.inPageTabLink(session, new_user_route, current_tag == .repo_user_new);
-        const user_route = ui.RoutablePage{ .repo_user = Array.from(identity) orelse return error.RouteTooLong };
+        const user_route = ui.RoutablePage{ .repo_user = .{ .name = Array.from(identity) orelse return error.RouteTooLong } };
         const user_link = try ui.inPageTabLink(session, user_route, current_tag == .repo_user);
 
         // the tab matching the current page is focused initially; matching by
@@ -358,7 +358,8 @@ pub const View = struct {
         // user tab. local mode has no users, so it has none.
         if (session.data.host_kind == .server) {
             const label = ui.UserSettings.tabLabel(session);
-            var text_box = try wgt.TextBox.init(allocator, label, .{ .border = .single, .round_corners = true, .wrap_kind = .none });
+            const count_label = try ui.UserSettings.tabBottomLabel(session);
+            var text_box = try wgt.TextBox.init(allocator, label, .{ .border = .single, .round_corners = true, .wrap_kind = .none, .bottom_label = .{ .text = count_label } });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().mode = .all;
             text_box.getFocus().kind = .{ .custom = user_link };
@@ -367,7 +368,7 @@ pub const View = struct {
             try tabs_box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
-                .min_size = .{ .width = label.len + 2, .height = null },
+                .min_size = .{ .width = @max(label.len, count_label.len) + 2, .height = null },
             });
         }
 

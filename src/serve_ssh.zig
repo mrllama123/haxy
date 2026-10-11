@@ -28,7 +28,8 @@ const any_repo_opts: rp.AnyRepoOpts(.xit) = .{ .ProgressCtx = *progress.Sideband
 
 pub const SessionHandler = struct {
     admin_repo_path: []const u8,
-    users_dir: []const u8,
+    // where event writes go
+    server: evt.Host.Server,
     wui_port: u16, // port the web UI is served on, shown in the TUI footer's url
     git_http_port: ?u16,
     git_ssh_port: ?u16,
@@ -236,7 +237,8 @@ fn runTui(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySiz
     ui_session.data.git_ssh_prefix = handler.git_ssh_prefix;
     // let page builders open on-disk repos
     ui_session.io = io;
-    ui_session.users_dir = handler.users_dir;
+    ui_session.users_dir = handler.server.users_dir;
+    ui_session.dirty_repos = handler.server.dirty_repos;
 
     var nav = try ui.Nav.init(allocator, &ui_session);
     defer nav.deinit(allocator);
@@ -384,7 +386,7 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, exec: ss
     const owner_repo = evt.parseOwnerRepoPath(repo_identity) orelse return writeError(sess, "repo path must be <owner>:<repo>");
     var author_arena = std.heap.ArenaAllocator.init(allocator);
     defer author_arena.deinit();
-    const author = switch (try authorizeRepoKey(io, &author_arena, handler.admin_repo_path, handler.users_dir, owner_repo.owner, owner_repo.name, parsed.service, &sess.fingerprint)) {
+    const author = switch (try authorizeRepoKey(io, &author_arena, handler.admin_repo_path, handler.server.users_dir, owner_repo.owner, owner_repo.name, parsed.service, &sess.fingerprint)) {
         .allowed => |user| user,
         .create => |creator| return runCreatingPush(handler, sess, &creator, owner_repo.name, protocol_version, &reader.interface, &writer.interface),
         .denied => return switch (parsed.service) {
@@ -394,7 +396,7 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, exec: ss
         .not_found => return writeError(sess, "repo not found"),
     };
 
-    const repo_path = switch (try serve_common.resolveRepoPath(io, allocator, handler.users_dir, handler.admin_repo_path, repo_identity)) {
+    const repo_path = switch (try serve_common.resolveRepoPath(io, allocator, handler.server.users_dir, handler.admin_repo_path, repo_identity)) {
         .ok => |p| p,
         .invalid => unreachable, // parsed above
         .not_found => return writeError(sess, "repo not found"),
@@ -410,7 +412,7 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, exec: ss
                 var sideband = progress.Sideband{ .writer = &writer.interface, .sess = sess };
                 try repo.uploadPack(io, allocator, &reader.interface, &writer.interface, .{ .protocol_version = protocol_version }, &sideband);
             },
-            .receive_pack => try push.receivePackAndConsume(repo.self_repo_opts, io, allocator, repo, &reader.interface, &writer.interface, .{ .protocol_version = protocol_version }, author, handler.users_dir, handler.err, sess),
+            .receive_pack => try push.receivePackAndConsume(repo.self_repo_opts, io, allocator, repo, &reader.interface, &writer.interface, .{ .protocol_version = protocol_version }, author, handler.server, handler.err, sess),
         },
     }
 }
@@ -436,11 +438,11 @@ fn runCreatingPush(
     // a client with nothing to push creates nothing
     const hash_kind = (try xit.net_server_receive_pack.peekObjectFormat(reader)) orelse return;
 
-    const location = evt.createRepo(io, allocator, handler.users_dir, &creator.owner_id, creator.owner, name, "", .private, hash_kind) catch |err| switch (err) {
+    const location = evt.createRepo(io, allocator, handler.server.users_dir, &creator.owner_id, creator.owner, name, "", .private, hash_kind) catch |err| switch (err) {
         error.NameTaken => return writeError(sess, "repo was just created by another push, try again"),
         else => |e| return e,
     };
-    const repo_path = try evt.repoPath(allocator, handler.users_dir, &location.owner_id, &location.repo_id);
+    const repo_path = try evt.repoPath(allocator, handler.server.users_dir, &location.owner_id, &location.repo_id);
     defer allocator.free(repo_path);
 
     switch (hash_kind) {
@@ -448,7 +450,7 @@ fn runCreatingPush(
             var repo = try rp.Repo(.xit, any_repo_opts.toRepoOptsWithHash(kind)).open(io, allocator, .{ .path = repo_path });
             defer repo.deinit(io, allocator);
             // stateless since the advertisement already went out
-            try push.receivePackAndConsume(repo.self_repo_opts, io, allocator, &repo, reader, writer, .{ .protocol_version = protocol_version, .is_stateless = true }, creator.owner, handler.users_dir, handler.err, sess);
+            try push.receivePackAndConsume(repo.self_repo_opts, io, allocator, &repo, reader, writer, .{ .protocol_version = protocol_version, .is_stateless = true }, creator.owner, handler.server, handler.err, sess);
         },
     }
 }
@@ -478,7 +480,7 @@ fn runForkSession(
     const fork_id = try evt.parseEventId(&route.id);
     const forker_id = (try evt.User.readIdByName(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, forker_repo.owner)) orelse
         return writeError(sess, "patch draft not found");
-    const fork_record = (try evt.readForkById(io, allocator, &admin_arena, handler.users_dir, &forker_id, &fork_id)) orelse
+    const fork_record = (try evt.readForkById(io, allocator, &admin_arena, handler.server.users_dir, &forker_id, &fork_id)) orelse
         return writeError(sess, "patch draft not found");
     if (fork_record.removed) return writeError(sess, "patch draft not found");
     const user = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &admin_arena, &forker_id)) orelse
@@ -487,7 +489,7 @@ fn runForkSession(
     if (service == .receive_pack and !isKeyInAuthorizedKeys(user.event.ssh_keys, &sess.fingerprint))
         return writeError(sess, "unauthorized: this SSH key is not registered to the patch author");
 
-    const target = (try evt.readRepoById(io, allocator, &admin_arena, handler.users_dir, fork_record.event.repo_user_id[0..evt.event_id_size], fork_record.event.repo_id[0..evt.event_id_size], forker_id)) orelse
+    const target = (try evt.readRepoById(io, allocator, &admin_arena, handler.server.users_dir, fork_record.event.repo_user_id[0..evt.event_id_size], fork_record.event.repo_id[0..evt.event_id_size], forker_id)) orelse
         return writeError(sess, "repo not found");
     // patches that are off take their drafts with them
     const patch_role = target.repo.event.patch_role orelse return writeError(sess, "patch draft not found");
@@ -496,7 +498,7 @@ fn runForkSession(
         if (!role.atLeast(patch_role)) return writeError(sess, "unauthorized: your role in this repo may not write patches");
     }
 
-    const draft_path = try fork.forkPath(allocator, handler.users_dir, &forker_id, &fork_id);
+    const draft_path = try fork.forkPath(allocator, handler.server.users_dir, &forker_id, &fork_id);
     defer allocator.free(draft_path);
     var draft = rp.AnyRepo(.xit, any_repo_opts).open(io, allocator, .{ .path = draft_path }) catch
         return writeError(sess, "patch draft not found");
@@ -508,7 +510,7 @@ fn runForkSession(
         }
     } else {
         if (!std.mem.eql(u8, target.repo.event.name, forker_repo.name)) return writeError(sess, "patch draft belongs to another repo");
-        const target_path = try evt.repoPath(allocator, handler.users_dir, fork_record.event.repo_user_id, fork_record.event.repo_id);
+        const target_path = try evt.repoPath(allocator, handler.server.users_dir, fork_record.event.repo_user_id, fork_record.event.repo_id);
         defer allocator.free(target_path);
         const author: evt.CommitAuthor = .{ .name = user.event.name, .email = user.event.email };
         const timestamp: u64 = @intCast(std.Io.Timestamp.now(io, .real).toSeconds());
@@ -517,7 +519,7 @@ fn runForkSession(
                 var target_repo = rp.Repo(.xit, repo.self_repo_opts).open(io, allocator, .{ .path = target_path }) catch
                     return writeError(sess, "repo not found or has the wrong hash");
                 defer target_repo.deinit(io, allocator);
-                try push.receiveFork(repo.self_repo_opts, io, allocator, repo, &target_repo, handler.users_dir, &route.id, author, timestamp, reader, writer, handler.err, sess);
+                try push.receiveFork(repo.self_repo_opts, io, allocator, repo, &target_repo, handler.server, &route.id, author, timestamp, reader, writer, handler.err, sess);
             },
         }
     }

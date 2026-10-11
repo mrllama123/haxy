@@ -93,7 +93,7 @@ pub const View = struct {
         const users_link = try ui.inPageTabLink(session, .{ .home_users = .{} }, current_tag == .home_users);
         const new_repo_link = try ui.inPageTabLink(session, .home_repo_new, current_tag == .home_repo_new);
         const new_user_link = try ui.inPageTabLink(session, .home_user_new, current_tag == .home_user_new);
-        const user_link = try ui.inPageTabLink(session, .home_user, current_tag == .home_user);
+        const user_link = try ui.inPageTabLink(session, .{ .home_user = .{} }, current_tag == .home_user);
         const current_link: []const u8 = switch (current_tag) {
             .home_users => users_link,
             .home_repo_new => new_repo_link,
@@ -175,7 +175,8 @@ pub const View = struct {
         // user tab
         {
             const label = ui.UserSettings.tabLabel(session);
-            var text_box = try wgt.TextBox.init(allocator, label, .{ .border = .single, .round_corners = true, .wrap_kind = .none });
+            const count_label = try ui.UserSettings.tabBottomLabel(session);
+            var text_box = try wgt.TextBox.init(allocator, label, .{ .border = .single, .round_corners = true, .wrap_kind = .none, .bottom_label = .{ .text = count_label } });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().mode = .all;
             text_box.getFocus().kind = .{ .custom = user_link };
@@ -184,7 +185,7 @@ pub const View = struct {
             try tabs_box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
-                .min_size = .{ .width = label.len + 2, .height = null },
+                .min_size = .{ .width = @max(label.len, count_label.len) + 2, .height = null },
             });
         }
 
