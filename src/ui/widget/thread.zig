@@ -654,10 +654,13 @@ fn appendAssignedRows(
         try row.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
 
         if (can_modify) {
+            const action = try pa.print("{s}" ++ assignee_seg ++ "{s}" ++ unassign_suffix, .{ thread_url, try ui.urlEncodeRef(pa, assignee.email) });
+            // the web renders a submit button only inside a form
+            row.getFocus().kind = .{ .custom = try pa.print("form:{s}", .{action}) };
             var remove = try wgt.TextBox.init(allocator, "✕", .{ .border = .single, .round_corners = true, .wrap_kind = .none });
             errdefer remove.deinit(allocator);
             remove.getFocus().mode = .all;
-            remove.getFocus().kind = .{ .custom = try pa.print("{s}{s}" ++ assignee_seg ++ "{s}" ++ unassign_suffix, .{ ui.submit_action_prefix, thread_url, try ui.urlEncodeRef(pa, assignee.email) }) };
+            remove.getFocus().kind = .{ .custom = try pa.print("{s}{s}", .{ ui.submit_action_prefix, action }) };
             try row.children.put(allocator, remove.getFocus().id, .{ .widget = .{ .text_box = remove }, .rect = null, .min_size = .{ .width = 3, .height = null } });
         }
 
