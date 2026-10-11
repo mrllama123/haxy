@@ -628,7 +628,7 @@ pub const WordFlow = struct {
     // backs each link item's `.custom` focus kind.
     arena: std.heap.ArenaAllocator,
 
-    pub const Item = struct { text: []const u8, link: []const u8 = "" };
+    pub const Item = struct { text: []const u8, link: []const u8 = "", top_label: []const u8 = "" };
 
     pub fn init(allocator: std.mem.Allocator) !WordFlow {
         return .{
@@ -652,8 +652,8 @@ pub const WordFlow = struct {
         self.arena.deinit();
     }
 
-    // the text box copies the item text; links are copied into the arena, so the
-    // caller's slices needn't outlive this call.
+    // the text box copies the item text; links and top labels are copied into the
+    // arena, so the caller's slices needn't outlive this call.
     pub fn setItems(self: *WordFlow, allocator: std.mem.Allocator, items: []const Item) !void {
         for (self.text_boxes.items) |*tb| tb.deinit(allocator);
         self.text_boxes.clearAndFree(allocator);
@@ -665,7 +665,7 @@ pub const WordFlow = struct {
         self.focus.child_id = null;
 
         for (items) |item| {
-            var text_box = try wgt.TextBox.init(allocator, item.text, .{ .border = .single, .round_corners = true, .wrap_kind = .none });
+            var text_box = try wgt.TextBox.init(allocator, item.text, .{ .border = .single, .round_corners = true, .wrap_kind = .none, .top_label = .{ .text = try aa.dupe(u8, item.top_label) } });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().mode = .all;
 

@@ -1031,7 +1031,7 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                 while (label_iter.next()) |label| {
                     if (label.len == 0) continue;
                     const search = try srch_thrd.withFilter(self.session.page_arena.allocator(), self.data.search orelse "", srch_thrd.label_prefix, label);
-                    try items.append(allocator, .{ .text = label, .link = try listLink(self.session.page_arena, self.data.identity, entryStatus(entry), "", search) });
+                    try items.append(allocator, .{ .text = label, .link = try listLink(self.session.page_arena, self.data.identity, entryStatus(entry), "", search), .top_label = " label " });
                 }
                 if (items.items.len > 0) {
                     var labels = try WordFlow.init(allocator);
