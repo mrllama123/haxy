@@ -73,6 +73,7 @@ pub fn logOut(session: *ui.Session) !void {
     try session.navigate(session.data.current_page.pageRoot());
 }
 
+const repos_label = "view repos";
 const logout_label = "logout";
 
 // the notifications and user settings sub tabs over their content, with the logout button across from them
@@ -80,21 +81,24 @@ pub const View = struct {
     box: wgt.Box(ui.Widget),
     data: *const Self,
     session: *ui.Session,
-    // the sub tabs' ids then the logout button's, in header order
-    control_ids: [3]usize,
+    // the sub tabs' ids then the repos and logout buttons', in header order
+    control_ids: [4]usize,
     // the sub tab whose content shows
     view_index: usize,
 
     const header_index = 0;
     const content_index = 1;
-    const logout_index = 2;
+    // the sub tabs come first in `control_ids`
+    const tab_count = 2;
+    const repos_index = 2;
+    const logout_index = 3;
 
     // `user_route` is the page's user tab route
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session, user_route: ui.RoutablePage) !View {
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .vert });
         errdefer box.deinit(allocator);
 
-        var control_ids: [3]usize = undefined;
+        var control_ids: [4]usize = undefined;
         const settings_route = user_route.withUserTab(.{ .view = .settings });
         {
             var header = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .horiz });
@@ -109,11 +113,19 @@ pub const View = struct {
                 control_ids[index] = tab.getFocus().id;
                 try header.children.put(allocator, tab.getFocus().id, .{ .widget = .{ .text_box = tab }, .rect = null, .min_size = .{ .width = label.len + 2, .height = null } });
             }
-            // the spacer pushes the logout button to the right edge
+            // the spacer pushes the buttons to the right edge
             {
                 var spacer = try ui.widget.Spacer.init(allocator);
                 errdefer spacer.deinit(allocator);
                 try header.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
+            }
+            {
+                var button = try wgt.TextBox.init(allocator, repos_label, .{ .border = .single, .round_corners = true, .wrap_kind = .none });
+                errdefer button.deinit(allocator);
+                button.getFocus().mode = .all;
+                button.getFocus().kind = .{ .custom = try ui.userLink(session.page_arena, session.data.user_name orelse unreachable) };
+                control_ids[repos_index] = button.getFocus().id;
+                try header.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = repos_label.len + 2, .height = 3 } });
             }
             {
                 // the form kind makes the web renderer post the button to the logout route
@@ -198,10 +210,10 @@ pub const View = struct {
         self.clearGrid();
         const header = self.headerBox();
         // focusing a sub tab shows its content, while the logout button leaves it
-        if (header.getFocus().child_id) |child_id| if (std.mem.indexOfScalar(usize, self.control_ids[0..logout_index], child_id)) |index| {
+        if (header.getFocus().child_id) |child_id| if (std.mem.indexOfScalar(usize, self.control_ids[0..tab_count], child_id)) |index| {
             self.view_index = index;
         };
-        for (self.control_ids[0..logout_index], 0..) |id, index| {
+        for (self.control_ids[0..tab_count], 0..) |id, index| {
             const tab = header.children.getPtr(id) orelse unreachable;
             ui.widget.markSelected(&tab.widget.text_box, index == self.view_index);
         }
