@@ -956,7 +956,11 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                         const action = try pa.print("{s}/{s}", .{ try route.toUrl(self.session.page_arena), @tagName(mode) });
                         // a status change already made the row a form, which the button's own action overrides
                         if (row.getFocus().kind != .custom) row.getFocus().kind = .{ .custom = try pa.print("form:{s}", .{action}) };
-                        try addToolButton(allocator, row, @tagName(mode), "", try pa.print("{s}{s}", .{ ui.submit_action_prefix, action }));
+                        const label = switch (mode) {
+                            .subscribe => "subscribe to",
+                            .mute => "mute",
+                        };
+                        try addToolButton(allocator, row, label, " notifications ", try pa.print("{s}{s}", .{ ui.submit_action_prefix, action }));
                     }
 
                     if (!conflicted) {
