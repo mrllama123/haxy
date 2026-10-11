@@ -223,7 +223,9 @@ pub fn init(
     view: ui.RoutablePage.IssuesView,
     viewer: ?ui.Viewer,
 ) !Self {
-    const empty = try emptyResult(arena.allocator(), identity, label, assignee, search, selected_id, comment_id, comments_start, theirs_picks, view);
+    var empty = try emptyResult(arena.allocator(), identity, label, assignee, search, selected_id, comment_id, comments_start, theirs_picks, view);
+    // the early returns below still let the viewer write
+    empty.viewer = viewer;
 
     const aa = arena.allocator();
     const DB = evt.EventDB(repo_opts.hash);

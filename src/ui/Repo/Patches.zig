@@ -583,6 +583,8 @@ pub fn init(
     const allowed_view: ui.RoutablePage.PatchesView = if (session.local != null and view == .drafts) .open else view;
     var empty = try emptyResult(arena.allocator(), identity, label, search, selected_id, comment_id, comments_start, theirs_picks, allowed_view);
     empty.default_target_branch = try arena.allocator().dupe(u8, target_branch);
+    // the early returns below still let the viewer write
+    empty.viewer = viewer;
 
     const aa = arena.allocator();
     const DB = evt.EventDB(repo_opts.hash);

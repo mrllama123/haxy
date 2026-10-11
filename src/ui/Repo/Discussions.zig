@@ -125,7 +125,9 @@ pub fn init(
     view: ui.RoutablePage.DiscussionsView,
     viewer: ?ui.Viewer,
 ) !Self {
-    const empty = try emptyResult(arena.allocator(), identity, label, search, selected_id, comment_id, comments_start, view);
+    var empty = try emptyResult(arena.allocator(), identity, label, search, selected_id, comment_id, comments_start, view);
+    // the early returns below still let the viewer write
+    empty.viewer = viewer;
     const aa = arena.allocator();
     const DB = evt.EventDB(repo_opts.hash);
     const rooted = empty.selected_id.len != 0;
