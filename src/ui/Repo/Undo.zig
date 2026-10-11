@@ -48,6 +48,11 @@ handle: ui.RepoHandle,
 // the clear-history confirmation stands in for the list
 clear: bool = false,
 
+// no history and no failure outside the clear form, which shows the empty message
+fn isEmpty(self: *const Self, session: *ui.Session) bool {
+    return !self.clear and self.items.len == 0 and (session.data.undo_failure orelse self.failure) == null;
+}
+
 pub fn init(comptime opts: rp.RepoOpts(.xit), arena: *std.heap.ArenaAllocator, repo: *rp.Repo(.xit, opts), haxy_moment: ?evt.AdminDB.HashMap(.read_only), identity: []const u8, selected: ?u64, handle: ui.RepoHandle) !Self {
     const aa = arena.allocator();
     const DB = rp.Repo(.xit, opts).DB;
@@ -401,11 +406,13 @@ pub const View = struct {
             try outer.children.put(allocator, header.getFocus().id, .{ .widget = .{ .box = header }, .rect = null, .min_size = .{ .width = null, .height = 4 } });
         }
 
-        if (data.clear) {
-            var center = try initClearForm(allocator, data, session);
+        // the clear form, or the empty message when there is no history or failure to show
+        if (data.clear or data.isEmpty(session)) {
+            var center = if (data.clear) try initClearForm(allocator, data, session) else try ui.widget.initEmpty(allocator);
             errdefer center.deinit(allocator);
             try outer.children.put(allocator, center.getFocus().id, .{ .widget = .{ .center = center }, .rect = null, .min_size = null });
-            outer.getFocus().child_id = outer.children.keys()[content_index];
+            // the empty message has nothing to focus, so focus rests on the sub-header
+            outer.getFocus().child_id = outer.children.keys()[if (data.clear) content_index else header_index];
             return .{ .box = outer, .data = data, .session = session };
         }
 
@@ -424,7 +431,8 @@ pub const View = struct {
                     const route = ui.RoutablePage.repoUndoRoute(data.identity, next) orelse return error.RouteTooLong;
                     try addText(allocator, &rows, "next →", try session.page_arena.allocator().print("a:{s}", .{try route.toUrl(session.page_arena)}), .hidden);
                 }
-                if (data.items.len == 0) try addText(allocator, &rows, "no undo history", null, .hidden);
+                // the failure row, filled in by build
+                if (data.items.len == 0) try addText(allocator, &rows, "", null, .hidden);
                 rows.getFocus().child_id = rows.children.keys()[0];
                 break :blk try wgt.Scroll(ui.Widget).init(allocator, .{ .box = rows }, .{ .direction = .vert, .web_native = !session.is_terminal, .fill = true });
             };
@@ -570,14 +578,15 @@ pub const View = struct {
 
     pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
         self.clearGrid();
-        if (self.data.clear) return try self.box.build(allocator, constraint, root_focus);
+        // the clear form or the empty message stands in for the list
+        if (self.data.clear or self.data.isEmpty(self.session)) return try self.box.build(allocator, constraint, root_focus);
         try self.refreshDetail(allocator);
         const rows = &self.listScroll().child.box;
         if (self.data.items.len == 0) {
-            const failure = self.session.data.undo_failure orelse self.data.failure;
+            // an empty list only shows to report its failure
+            const failure = self.session.data.undo_failure orelse self.data.failure orelse unreachable;
             if (!std.meta.eql(self.shown_failure, failure)) {
-                const message = if (failure) |name| try self.session.page_arena.allocator().print("error: {s}", .{name}) else "no undo history";
-                try rows.children.values()[0].widget.text_box.setContent(allocator, message);
+                try rows.children.values()[0].widget.text_box.setContent(allocator, try self.session.page_arena.allocator().print("error: {s}", .{failure}));
                 self.shown_failure = failure;
             }
         }
@@ -596,7 +605,8 @@ pub const View = struct {
         // scrolling crosses the boundary the same way the arrow keys do
         const direction = inp.vertDirection(key);
         if (self.headerActive()) {
-            if (direction == .down) root_focus.setFocus(self.box.children.values()[content_index].widget.getFocus().id);
+            // the empty message has nothing to focus
+            if (direction == .down and !self.data.isEmpty(self.session)) root_focus.setFocus(self.box.children.values()[content_index].widget.getFocus().id);
             return;
         }
         if (self.data.clear) {

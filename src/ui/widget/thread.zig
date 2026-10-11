@@ -1913,11 +1913,15 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             inline for (@typeInfo(Status).@"enum".field_values) |value| {
                 var split = try initSplit(allocator, session, data, @fromBackingInt(@intCast(value)), false);
                 errdefer split.deinit(allocator);
-                try stack.children.put(allocator, split.getFocus().id, .{ .box = split });
+                try stack.children.put(allocator, split.getFocus().id, split);
             }
 
-            // the labels view
-            {
+            // the labels view, or the empty message without labels
+            if (labelsEmpty(data)) {
+                var center = try widget.initEmpty(allocator);
+                errdefer center.deinit(allocator);
+                try stack.children.put(allocator, center.getFocus().id, .{ .center = center });
+            } else {
                 var tf = try WordFlow.init(allocator);
                 errdefer tf.deinit(allocator);
                 var items: std.ArrayList(WordFlow.Item) = .empty;
@@ -2048,7 +2052,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             if (supports_drafts) {
                 var split = try initSplit(allocator, session, data, null, true);
                 errdefer split.deinit(allocator);
-                try stack.children.put(allocator, split.getFocus().id, .{ .box = split });
+                try stack.children.put(allocator, split.getFocus().id, split);
             }
 
             // the conflicts split; its tab exists only when the repo has
@@ -2057,7 +2061,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             if (supports_conflicts and data.conflicts.count > 0) {
                 var split = try initSplit(allocator, session, data, null, false);
                 errdefer split.deinit(allocator);
-                try stack.children.put(allocator, split.getFocus().id, .{ .box = split });
+                try stack.children.put(allocator, split.getFocus().id, split);
             }
 
             // the stack starts on the page's view.
@@ -2074,12 +2078,13 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         }
 
         // the master-detail split showing `status`'s window, or the conflicts
-        // window when null.
-        fn initSplit(allocator: std.mem.Allocator, session: *ui.Session, data: *const Self, status_maybe: ?Status, drafts: bool) !wgt.Box(Widget) {
+        // window when null. an empty first window shows the empty message instead.
+        fn initSplit(allocator: std.mem.Allocator, session: *ui.Session, data: *const Self, status_maybe: ?Status, drafts: bool) !Widget {
+            const win = if (status_maybe) |status| data.window(status) else if (drafts and supports_drafts) &data.drafts else if (supports_conflicts) &data.conflicts else unreachable;
+            if (windowEmpty(win)) return .{ .center = try widget.initEmpty(allocator) };
+
             var box = try wgt.Box(Widget).init(allocator, .{ .border = null, .direction = .horiz });
             errdefer box.deinit(allocator);
-
-            const win = if (status_maybe) |status| data.window(status) else if (drafts and supports_drafts) &data.drafts else if (supports_conflicts) &data.conflicts else unreachable;
 
             // the thread list (one focusable row per title), plus a "next" link that
             // reloads the page rooted at the following thread.
@@ -2126,7 +2131,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
 
             // the page opens on the list, unless the url names a thread
             box.getFocus().child_id = box.children.keys()[if (data.selected_id.len > 0) detail_index else list_index];
-            return box;
+            return .{ .box = box };
         }
 
         // a thread form, plus the target branch for patches, prefilled from
@@ -2493,6 +2498,11 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             return &self.viewStack().children.values()[labels_view_index].word_flow;
         }
 
+        // no labels and no filter to clear, which shows the empty message
+        fn labelsEmpty(data: *const Self) bool {
+            return data.label.len == 0 and data.labels.len == 0;
+        }
+
         // the non-confirmation form inside the stack
         fn formBox(self: *This) ?*wgt.Box(Widget) {
             return switch (self.viewStack().children.values()[form_view_index]) {
@@ -2566,17 +2576,23 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             return self.data.window(splitStatus(index));
         }
 
+        // an empty first window, which shows the empty message
+        fn windowEmpty(win: *const Window) bool {
+            return win.items.len == 0 and win.prev_id == null;
+        }
+
         fn stackSelectedIndex(self: *This) ?usize {
             const stack = self.viewStack();
             const cid = stack.getFocus().child_id orelse return null;
             return stack.children.getIndex(cid);
         }
 
-        // the stack's selected master-detail split (null when the labels view or the
-        // new-thread form shows).
+        // the stack's selected master-detail split (null when the labels view, the
+        // new-thread form, or the empty message shows).
         fn selectedSplitIndex(self: *This) ?usize {
             const idx = self.stackSelectedIndex() orelse return null;
-            return if (idx < status_count or (supports_drafts and idx == drafts_view_index) or idx == conflict_view_index) idx else null;
+            const split = idx < status_count or (supports_drafts and idx == drafts_view_index) or idx == conflict_view_index;
+            return if (split and !windowEmpty(self.window(idx))) idx else null;
         }
 
         fn detailActive(self: *This, index: usize) bool {
@@ -2707,12 +2723,16 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 // view has something to focus; enter in the search box submits
                 // the query; other keys move within the sub-header.
                 if (inp.vertDirection(key) == .down) {
-                    const enterable = if (self.viewStack().getSelected()) |selected| switch (selected.*) {
-                        .word_flow => |*tf| tf.text_boxes.items.len > 0,
-                        // nothing focusable in the unauthorized view
-                        .unauthorized => false,
-                        else => true,
-                    } else false;
+                    const enterable = if (self.stackSelectedIndex()) |idx|
+                        if (idx == labels_view_index)
+                            !labelsEmpty(self.data)
+                        else if (idx == form_view_index)
+                            // nothing focusable in the unauthorized view
+                            self.viewStack().children.values()[idx] != .unauthorized
+                        else
+                            !windowEmpty(self.window(idx))
+                    else
+                        false;
                     if (enterable) root_focus.setFocus(self.box.children.keys()[stack_index]);
                 } else if (key == .enter) {
                     if (try self.header().submittedText(allocator)) |submission| {

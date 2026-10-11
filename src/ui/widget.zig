@@ -340,6 +340,15 @@ pub fn initNoCommits(allocator: std.mem.Allocator, session: *ui.Session, handle:
     return Center.init(allocator, .{ .box = box });
 }
 
+const empty_label = "nothing to see here";
+
+// the message a list or tab shows in place of its empty first window
+pub fn initEmpty(allocator: std.mem.Allocator) !Center {
+    var text_box = try wgt.TextBox.init(allocator, empty_label, .{ .border = null, .wrap_kind = .none });
+    errdefer text_box.deinit(allocator);
+    return Center.init(allocator, .{ .text_box = text_box });
+}
+
 pub const FlowBox = struct {
     focus: *Focus,
     grid: ?Grid,
@@ -591,10 +600,6 @@ pub const FlowBox = struct {
 
         pub fn getFocus(self: *Scroll) *Focus {
             return self.scroll.getFocus();
-        }
-
-        pub fn isEmpty(self: Scroll) bool {
-            return self.scroll.child.flow_box.text_boxes.items.len == 0;
         }
 
         pub fn atTop(self: Scroll) bool {

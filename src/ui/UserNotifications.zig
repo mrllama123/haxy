@@ -62,6 +62,11 @@ pub fn init(arena: *std.heap.ArenaAllocator, session: *ui.Session, tab: ui.Routa
     return result;
 }
 
+// a first window without notifs, which shows the empty message
+fn isEmpty(self: *const Self) bool {
+    return self.rows.len == 0 and self.start == 0;
+}
+
 // leave the user tab for the page it belongs to, where the web's logout redirect also lands
 pub fn logOut(session: *ui.Session) !void {
     session.logOut();
@@ -73,6 +78,7 @@ const logout_label = "logout";
 // the notifications and user settings sub tabs over their content, with the logout button across from them
 pub const View = struct {
     box: wgt.Box(ui.Widget),
+    data: *const Self,
     session: *ui.Session,
     // the sub tabs' ids then the logout button's, in header order
     control_ids: [3]usize,
@@ -127,7 +133,12 @@ pub const View = struct {
         {
             var stack = try wgt.Stack(ui.Widget).init(allocator);
             errdefer stack.deinit(allocator);
-            {
+            // an empty first window has no rows, not even paging ones
+            if (data.isEmpty()) {
+                var center = try ui.widget.initEmpty(allocator);
+                errdefer center.deinit(allocator);
+                try stack.children.put(allocator, center.getFocus().id, .{ .center = center });
+            } else {
                 var list = try ui.widget.FlowBox.Scroll.init(allocator, .{}, !session.is_terminal);
                 errdefer list.deinit(allocator);
 
@@ -164,7 +175,7 @@ pub const View = struct {
             try box.children.put(allocator, stack.getFocus().id, .{ .widget = .{ .stack = stack }, .rect = null, .min_size = null });
         }
         box.getFocus().child_id = box.children.keys()[content_index];
-        return .{ .box = box, .session = session, .control_ids = control_ids, .view_index = @backingInt(data.view) };
+        return .{ .box = box, .data = data, .session = session, .control_ids = control_ids, .view_index = @backingInt(data.view) };
     }
 
     pub fn deinit(self: *View, allocator: std.mem.Allocator) void {
@@ -210,8 +221,8 @@ pub const View = struct {
             const focused = root_focus.grandchild_id orelse return;
             if (key == .enter and focused == logout_id) return logOut(self.session);
             if (direction == .down) {
-                // an empty list has nothing to focus
-                if (self.contentStack().getSelected()) |selected| if (selected.* == .flow_box_scroll and selected.flow_box_scroll.isEmpty()) return;
+                // the empty message has nothing to focus
+                if (self.view_index == @backingInt(ui.RoutablePage.UserView.notifications) and self.data.isEmpty()) return;
                 root_focus.setFocus(self.contentStack().getFocus().id);
             } else if (std.mem.indexOfScalar(usize, &self.control_ids, focused)) |current| {
                 if (inp.moveTab(key, current, self.control_ids.len)) |next| root_focus.setFocus(self.control_ids[next]);

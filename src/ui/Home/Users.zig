@@ -59,6 +59,11 @@ pub fn init(
     return result;
 }
 
+// a first window without users, which shows the empty message
+fn isEmpty(self: *const Self) bool {
+    return self.users.len == 0 and self.start == 0;
+}
+
 pub const View = struct {
     // a vertical box: the search sub-header above the scrolling list. focus
     // points at the header's box or the list's selected row.
@@ -91,7 +96,12 @@ pub const View = struct {
             try box.children.put(allocator, header.getFocus().id, .{ .widget = .{ .box = header }, .rect = null, .min_size = .{ .width = null, .height = ui.widget.SearchBox.min_size.height } });
         }
 
-        {
+        // an empty first window has no rows, not even paging ones
+        if (data.isEmpty()) {
+            var center = try ui.widget.initEmpty(allocator);
+            errdefer center.deinit(allocator);
+            try box.children.put(allocator, center.getFocus().id, .{ .widget = .{ .center = center }, .rect = null, .min_size = null });
+        } else {
             var list = try ui.widget.FlowBox.Scroll.init(allocator, .{ .cell_height = 1 }, !session.is_terminal);
             errdefer list.deinit(allocator);
 
@@ -149,7 +159,11 @@ pub const View = struct {
         const direction = inp.vertDirection(key);
         if (self.headerActive()) {
             const search_box = self.searchBox();
-            if (direction == .down) return root_focus.setFocus(self.listScroll().getFocus().id);
+            if (direction == .down) {
+                // the empty message has nothing to focus
+                if (!self.data.isEmpty()) root_focus.setFocus(self.listScroll().getFocus().id);
+                return;
+            }
             if (key == .enter) {
                 const text = try search_box.text(allocator);
                 defer allocator.free(text);

@@ -105,6 +105,11 @@ pub fn filesRoute(self: *const Self, path: []const u8, line: usize) ?ui.Routable
     return route.withFind(self.find orelse return route);
 }
 
+// an empty root listing, which shows the empty message
+fn isEmpty(self: *const Self) bool {
+    return self.entries.len == 0 and self.dir.len == 0;
+}
+
 // build the listing for an opened repo. generic over the repo's backend and
 // hash kind so the tree/diff types it threads through match the repo's opts.
 // reads with the arena's backing allocator (transient); the listing is built
@@ -381,6 +386,16 @@ pub const View = struct {
             try outer.children.put(allocator, header_view.getFocus().id, .{ .widget = .{ .search_header = header_view }, .rect = null, .min_size = .{ .width = null, .height = 4 } });
         }
 
+        // an empty root listing shows the empty message in place of the split
+        if (data.isEmpty()) {
+            var center = try ui.widget.initEmpty(allocator);
+            errdefer center.deinit(allocator);
+            try outer.children.put(allocator, center.getFocus().id, .{ .widget = .{ .center = center }, .rect = null, .min_size = null });
+            // with nothing below to focus, focus rests on the sub-header
+            outer.getFocus().child_id = outer.children.keys()[header_index];
+            return .{ .box = outer, .data = data, .session = session };
+        }
+
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .horiz });
         errdefer box.deinit(allocator);
 
@@ -602,7 +617,7 @@ pub const View = struct {
 
     pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
         self.clearGrid();
-        if (self.data.no_commits) return self.box.build(allocator, constraint, root_focus);
+        if (self.data.no_commits or self.data.isEmpty()) return self.box.build(allocator, constraint, root_focus);
 
         // whether the detail pane fits beside the list, which decides the list
         // cap below and whether the detail carries a way back to the list
@@ -769,7 +784,8 @@ pub const View = struct {
             // active means there is one
             const header_view = self.header() orelse unreachable;
             if (direction == .down) {
-                root_focus.setFocus(self.contentBox().getFocus().id);
+                // the empty message has nothing to focus
+                if (!self.data.isEmpty()) root_focus.setFocus(self.contentBox().getFocus().id);
                 return;
             }
             if (key == .enter) if (try header_view.submittedText(allocator)) |term| {
@@ -982,7 +998,7 @@ pub const View = struct {
 
     // only the header's own row sits directly below the repository header.
     pub fn atTop(self: *View) bool {
-        if (self.data.no_commits) return true;
+        if (self.data.no_commits or self.data.isEmpty()) return true;
         const focusable = if (self.header()) |header_view| header_view.hasFocusable() else false;
         return self.headerActive() or (!focusable and self.contentAtTop());
     }

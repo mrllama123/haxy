@@ -178,11 +178,24 @@ pub fn init(
     };
 }
 
+// a first repos window without repos, which shows the empty message
+fn reposEmpty(self: *const Self) bool {
+    return self.repos.len == 0 and self.repos_start == 0;
+}
+
+// a first forks window without forks, which shows the empty message
+fn forksEmpty(self: *const Self) bool {
+    return self.forks.len == 0 and self.forks_start == 0;
+}
+
 pub const View = struct {
     box: wgt.Box(ui.Widget),
+    data: *const Self,
 
     const header_index: usize = 0;
     const stack_index: usize = 1;
+    // the forks tab's position in the stack
+    const forks_index: usize = 1;
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .round_corners = true, .direction = .vert });
@@ -207,8 +220,12 @@ pub const View = struct {
                 try stack.children.put(allocator, repos_view.getFocus().id, .{ .user_repos = repos_view });
             }
 
-            // forks list
-            {
+            // forks list, or the empty message for an empty first window
+            if (data.forksEmpty()) {
+                var center = try ui.widget.initEmpty(allocator);
+                errdefer center.deinit(allocator);
+                try stack.children.put(allocator, center.getFocus().id, .{ .center = center });
+            } else {
                 var list = try ui.widget.FlowBox.Scroll.init(allocator, .{}, !session.is_terminal);
                 errdefer list.deinit(allocator);
 
@@ -264,7 +281,7 @@ pub const View = struct {
             try box.children.put(allocator, stack.getFocus().id, .{ .widget = .{ .stack = stack }, .rect = null, .min_size = null });
         }
 
-        var self = View{ .box = box };
+        var self = View{ .box = box, .data = data };
         // search results open in the tab's own search box
         self.getFocus().child_id = box.children.keys()[if (data.repos_search != null) stack_index else header_index];
         return self;
@@ -315,10 +332,10 @@ pub const View = struct {
                     .down => {
                         switch (child.*) {
                             .user_header => {
+                                // the empty message has nothing to focus
+                                if (self.data.forksEmpty() and stack.getFocus().child_id == stack.children.keys()[forks_index]) return;
                                 if (stack.getSelected()) |selected_widget| switch (selected_widget.*) {
                                     .user_repos => |*v| return v.focusHeader(root_focus),
-                                    // an empty list has nothing to focus
-                                    .flow_box_scroll => |*v| if (v.isEmpty()) return,
                                     .user_notifications => |*v| if (v.focusHeader(root_focus)) return,
                                     else => {},
                                 };
@@ -387,7 +404,12 @@ pub const ReposView = struct {
             try box.children.put(allocator, header.getFocus().id, .{ .widget = .{ .box = header }, .rect = null, .min_size = .{ .width = null, .height = ui.widget.SearchBox.min_size.height } });
         }
 
-        {
+        // an empty first window has no rows, not even paging ones
+        if (data.reposEmpty()) {
+            var center = try ui.widget.initEmpty(allocator);
+            errdefer center.deinit(allocator);
+            try box.children.put(allocator, center.getFocus().id, .{ .widget = .{ .center = center }, .rect = null, .min_size = null });
+        } else {
             var list = try ui.widget.FlowBox.Scroll.init(allocator, .{}, !session.is_terminal);
             errdefer list.deinit(allocator);
 
@@ -446,7 +468,11 @@ pub const ReposView = struct {
         const direction = inp.vertDirection(key);
         if (self.headerActive()) {
             const search_box = self.searchBox();
-            if (direction == .down) return root_focus.setFocus(self.listScroll().getFocus().id);
+            if (direction == .down) {
+                // the empty message has nothing to focus
+                if (!self.data.reposEmpty()) root_focus.setFocus(self.listScroll().getFocus().id);
+                return;
+            }
             if (key == .enter) {
                 const text = try search_box.text(allocator);
                 defer allocator.free(text);

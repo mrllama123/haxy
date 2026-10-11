@@ -35,6 +35,11 @@ pub const Window = struct {
     count: usize = 0,
     events: []const Item = &.{},
     next: ?EventRef = null,
+
+    // a window without events, which shows the empty message
+    fn isEmpty(self: *const Window) bool {
+        return self.events.len == 0;
+    }
 };
 
 identity: []const u8,
@@ -391,9 +396,9 @@ pub const View = struct {
         var content_stack = try wgt.Stack(ui.Widget).init(allocator);
         errdefer content_stack.deinit(allocator);
         inline for ([_]ui.RoutablePage.EventsView{ .active, .removed }) |view| {
-            var content_box = try initContent(allocator, data, session, view);
-            errdefer content_box.deinit(allocator);
-            try content_stack.children.put(allocator, content_box.getFocus().id, .{ .box = content_box });
+            var view_content = try initContent(allocator, data, session, view);
+            errdefer view_content.deinit(allocator);
+            try content_stack.children.put(allocator, view_content.getFocus().id, view_content);
         }
         content_stack.getFocus().child_id = content_stack.children.keys()[@backingInt(data.view)];
         try outer.children.put(allocator, content_stack.getFocus().id, .{ .widget = .{ .stack = content_stack }, .rect = null, .min_size = null });
@@ -401,13 +406,16 @@ pub const View = struct {
         return .{ .box = outer, .data = data, .session = session, .detailed_index = .{ null, null } };
     }
 
-    fn initContent(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session, view: ui.RoutablePage.EventsView) !wgt.Box(ui.Widget) {
+    // an empty window shows the empty message in place of the list and detail
+    fn initContent(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session, view: ui.RoutablePage.EventsView) !ui.Widget {
+        const event_window = data.window(view);
+        if (event_window.isEmpty()) return .{ .center = try ui.widget.initEmpty(allocator) };
+
         var content_box = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .horiz });
         errdefer content_box.deinit(allocator);
 
         var list_box = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .vert, .stretch = true });
         errdefer list_box.deinit(allocator);
-        const event_window = data.window(view);
         for (event_window.events) |event| {
             const route = ui.RoutablePage.repoEventsRoute(data.identity, view, event.kind, event.id, data.moment) orelse return error.RouteTooLong;
             const link = try session.page_arena.allocator().print("ai:{s}", .{try route.toUrl(session.page_arena)});
@@ -438,8 +446,8 @@ pub const View = struct {
         }
         try content_box.children.put(allocator, frame.getFocus().id, .{ .widget = .{ .box = frame }, .rect = null, .min_size = .{ .width = detail_min_width, .height = null } });
 
-        content_box.getFocus().child_id = content_box.children.keys()[if (event_window.events.len > 0) detail_index else list_index];
-        return content_box;
+        content_box.getFocus().child_id = content_box.children.keys()[detail_index];
+        return .{ .box = content_box };
     }
 
     fn addRow(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), text: []const u8, link: []const u8) !void {
@@ -515,6 +523,7 @@ pub const View = struct {
         self.clearGrid();
         if (self.header().getSelectedIndex()) |index|
             self.contentStack().getFocus().child_id = self.contentStack().children.keys()[index];
+        if (self.eventWindow().isEmpty()) return self.box.build(allocator, constraint, root_focus);
         try self.refreshDetail(allocator);
 
         const list = self.listBox();
@@ -574,7 +583,10 @@ pub const View = struct {
         // scrolling crosses the sub header boundary the same way arrows do
         const direction = inp.vertDirection(key);
         if (self.headerActive()) {
-            if (direction == .down) root_focus.setFocus(self.content().getFocus().id) else try self.header().input(allocator, key, root_focus);
+            if (direction == .down) {
+                // the empty message has nothing to focus
+                if (!self.eventWindow().isEmpty()) root_focus.setFocus(self.content().getFocus().id);
+            } else try self.header().input(allocator, key, root_focus);
             return;
         }
         // the way back to the list, by enter or a click

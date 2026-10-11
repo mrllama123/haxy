@@ -50,6 +50,11 @@ pub fn emptyResult(arena: *std.heap.ArenaAllocator, identity: []const u8, kind: 
     };
 }
 
+// both columns empty with no previous row, which shows the empty message
+fn isEmpty(self: *const Self) bool {
+    return self.branches.names.len == 0 and self.branches.prev == null and self.tags.names.len == 0 and self.tags.prev == null;
+}
+
 // read one window of each column from an opened repo. the ref names are duped
 // into the page arena so they outlive the repo handle.
 pub fn init(
@@ -177,7 +182,12 @@ pub const View = struct {
             try outer.children.put(allocator, header.getFocus().id, .{ .widget = .{ .box = header }, .rect = null, .min_size = .{ .width = null, .height = 4 } });
         }
 
-        {
+        // with both columns empty, the empty message stands in for them
+        if (data.isEmpty()) {
+            var center = try ui.widget.initEmpty(allocator);
+            errdefer center.deinit(allocator);
+            try outer.children.put(allocator, center.getFocus().id, .{ .widget = .{ .center = center }, .rect = null, .min_size = null });
+        } else {
             var split = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .horiz });
             errdefer split.deinit(allocator);
 
@@ -266,16 +276,18 @@ pub const View = struct {
 
         // split the available width evenly between the two columns when it's
         // known; otherwise let them size to their content.
-        if (constraint.max_size.width) |w| {
-            const half = w / 2;
-            for (self.columns().children.values()) |*child| {
-                child.min_size = .{ .width = half, .height = null };
-                child.max_size = .{ .width = half, .height = null };
-            }
-        } else {
-            for (self.columns().children.values()) |*child| {
-                child.min_size = null;
-                child.max_size = null;
+        if (!self.data.isEmpty()) {
+            if (constraint.max_size.width) |w| {
+                const half = w / 2;
+                for (self.columns().children.values()) |*child| {
+                    child.min_size = .{ .width = half, .height = null };
+                    child.max_size = .{ .width = half, .height = null };
+                }
+            } else {
+                for (self.columns().children.values()) |*child| {
+                    child.min_size = null;
+                    child.max_size = null;
+                }
             }
         }
 
@@ -290,7 +302,11 @@ pub const View = struct {
     pub fn input(self: *View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
         if (self.headerActive()) {
             const search_box = self.searchBox();
-            if (inp.vertDirection(key) == .down) return root_focus.setFocus(self.columns().getFocus().id);
+            if (inp.vertDirection(key) == .down) {
+                // the empty message has nothing to focus
+                if (!self.data.isEmpty()) root_focus.setFocus(self.columns().getFocus().id);
+                return;
+            }
             if (key == .enter) {
                 const text = try search_box.text(allocator);
                 defer allocator.free(text);
