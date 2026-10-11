@@ -154,11 +154,6 @@ pub const RoutablePage = union(enum) {
     },
     repo_issues: struct {
         name: Array(repo_route_max_len),
-        // the label the list is filtered to, url-encoded ("" = unfiltered).
-        label: Array(issue_label_route_max_len) = .{},
-        // the assignee the list is filtered to, a url-encoded name or email as
-        // typed ("" = unfiltered).
-        assignee: Array(assignee_route_max_len) = .{},
         // the query the list is filtered to, url-encoded ("" = unfiltered).
         search: Array(search_route_max_len) = .{},
         // the issue the route names: the list's window root, or the issue the
@@ -177,7 +172,6 @@ pub const RoutablePage = union(enum) {
     },
     repo_patches: struct {
         name: Array(repo_route_max_len),
-        label: Array(patch_label_route_max_len) = .{},
         search: Array(search_route_max_len) = .{},
         selected: Array(evt.event_id_size * 2) = .{},
         theirs: Array(theirs_route_max_len) = .{},
@@ -187,7 +181,6 @@ pub const RoutablePage = union(enum) {
     },
     repo_discussions: struct {
         name: Array(repo_route_max_len),
-        label: Array(discussion_label_route_max_len) = .{},
         search: Array(search_route_max_len) = .{},
         selected: Array(evt.event_id_size * 2) = .{},
         view: DiscussionsView = .recent,
@@ -238,7 +231,7 @@ pub const RoutablePage = union(enum) {
 
     // the "key:value" segments of a url tail, collected in any order
     const Params = struct {
-        const ParamKey = enum { start, line, branch, tag, label, assignee, object, base, patchrev, theirs, find, search, from, moment, merge, user };
+        const ParamKey = enum { start, line, branch, tag, object, base, patchrev, theirs, find, search, from, moment, merge, user };
 
         // a branch:/tag:/object: param; the value stays url-encoded
         const RefParam = struct { kind: RefOrOid, value: []const u8 };
@@ -323,8 +316,6 @@ pub const RoutablePage = union(enum) {
     // ends a commits route naming its commit's full message
     const message_seg = "message";
     // the `Params` key spellings the url emitters use
-    const label_filter_seg = @tagName(Params.ParamKey.label) ++ ":";
-    const assignee_seg = @tagName(Params.ParamKey.assignee) ++ ":";
     const start_seg = @tagName(Params.ParamKey.start) ++ ":";
     const line_seg = @tagName(Params.ParamKey.line) ++ ":";
     const find_seg = @tagName(Params.ParamKey.find) ++ ":";
@@ -355,14 +346,6 @@ pub const RoutablePage = union(enum) {
         return s.len == 0 or s[0] == '/';
     }
 
-    // a url-encoded label can grow to three bytes per source byte.
-    pub const issue_label_route_max_len = evt.Issue.label_max_len * 3;
-    pub const patch_label_route_max_len = evt.Patch.label_max_len * 3;
-    pub const discussion_label_route_max_len = evt.Discussion.label_max_len * 3;
-
-    // a url-encoded email can grow to three bytes per source byte.
-    pub const assignee_route_max_len = evt.Assignment.email_max_len * 3;
-
     // caps the resolve view's theirs: field list (a longer one doesn't route).
     pub const theirs_route_max_len = 512;
 
@@ -372,8 +355,8 @@ pub const RoutablePage = union(enum) {
     // caps the files tab's url-encoded search term.
     pub const find_route_max_len = 100 * 3;
 
-    // caps the commits tab's url-encoded search query.
-    pub const search_route_max_len = 100 * 3;
+    // caps a url-encoded search query, room enough for an email assignee term.
+    pub const search_route_max_len = 512 * 3;
 
     // the identity stored by every repo route. Local routes elide it.
     pub const RepoIdentity = struct {
@@ -686,33 +669,6 @@ pub const RoutablePage = union(enum) {
         return withEncodedSearch(self, search.slice());
     }
 
-    // the label, assignee and search segments of a thread list url, each optional
-    fn writeListFilters(writer: *std.Io.Writer, label: []const u8, assignee: []const u8, search: []const u8) !void {
-        if (label.len != 0) try writer.print("/" ++ label_filter_seg ++ "{s}", .{label});
-        if (assignee.len != 0) try writer.print("/" ++ assignee_seg ++ "{s}", .{assignee});
-        if (search.len != 0) try writer.print("/" ++ search_seg ++ "{s}", .{search});
-    }
-
-    // carry the already-encoded list filters a selected thread's url names
-    fn withEncodedFilters(self: ?RoutablePage, label: []const u8, search: []const u8) ?RoutablePage {
-        var route = withEncodedSearch(self, search) orelse return null;
-        switch (route) {
-            inline .repo_issues, .repo_patches, .repo_discussions => |*thread| thread.label = @TypeOf(thread.label).from(label) orelse return null,
-            else => return null,
-        }
-        return route;
-    }
-
-    // carry an already-encoded assignee filter on an issues route
-    pub fn withEncodedAssignee(self: ?RoutablePage, value: []const u8) ?RoutablePage {
-        var route = self orelse return null;
-        switch (route) {
-            .repo_issues => |*i| i.assignee = Array(assignee_route_max_len).from(value) orelse return null,
-            else => return null,
-        }
-        return route;
-    }
-
     // carry an already-encoded search param, as a url hands it over
     fn withEncodedSearch(self: ?RoutablePage, value: []const u8) ?RoutablePage {
         var route = self orelse return null;
@@ -836,12 +792,11 @@ pub const RoutablePage = union(enum) {
     }
 
     // build a `.repo_issues` route for "owner:name" (identity) showing
-    // `status`'s list, filtered to the url-encoded `label` ("" = unfiltered) and
-    // rooted at the issue with hex event id `selected` ("" = the first window).
-    pub fn repoIssuesRoute(identity: []const u8, status: evt.Issue.Status, label: []const u8, selected: []const u8) ?RoutablePage {
+    // `status`'s list, rooted at the issue with hex event id `selected` ("" =
+    // the first window).
+    pub fn repoIssuesRoute(identity: []const u8, status: evt.Issue.Status, selected: []const u8) ?RoutablePage {
         return .{ .repo_issues = .{
             .name = Array(repo_route_max_len).from(identity) orelse return null,
-            .label = Array(issue_label_route_max_len).from(label) orelse return null,
             .selected = Array(evt.event_id_size * 2).from(selected) orelse return null,
             .view = switch (status) {
                 .open => .open,
@@ -850,10 +805,9 @@ pub const RoutablePage = union(enum) {
         } };
     }
 
-    pub fn repoPatchesRoute(identity: []const u8, status: evt.Patch.StatusKind, label: []const u8, selected: []const u8) ?RoutablePage {
+    pub fn repoPatchesRoute(identity: []const u8, status: evt.Patch.StatusKind, selected: []const u8) ?RoutablePage {
         return .{ .repo_patches = .{
             .name = Array(repo_route_max_len).from(identity) orelse return null,
-            .label = Array(patch_label_route_max_len).from(label) orelse return null,
             .selected = Array(evt.event_id_size * 2).from(selected) orelse return null,
             .view = switch (status) {
                 .open => .open,
@@ -872,7 +826,7 @@ pub const RoutablePage = union(enum) {
 
     pub fn repoPatchPublishRoute(identity: []const u8, selected: []const u8) ?RoutablePage {
         if (selected.len == 0) return null;
-        var route = repoPatchesRoute(identity, .open, "", selected) orelse return null;
+        var route = repoPatchesRoute(identity, .open, selected) orelse return null;
         switch (route) {
             .repo_patches => |*patch| patch.view = .publish,
             else => unreachable,
@@ -882,7 +836,7 @@ pub const RoutablePage = union(enum) {
 
     pub fn repoPatchMergeRoute(identity: []const u8, selected: []const u8) ?RoutablePage {
         if (selected.len == 0) return null;
-        var route = repoPatchesRoute(identity, .open, "", selected) orelse return null;
+        var route = repoPatchesRoute(identity, .open, selected) orelse return null;
         switch (route) {
             .repo_patches => |*patch| patch.view = .merge,
             else => unreachable,
@@ -890,27 +844,26 @@ pub const RoutablePage = union(enum) {
         return route;
     }
 
-    pub fn repoDiscussionsRoute(identity: []const u8, label: []const u8, selected: []const u8) ?RoutablePage {
+    pub fn repoDiscussionsRoute(identity: []const u8, selected: []const u8) ?RoutablePage {
         return .{ .repo_discussions = .{
             .name = Array(repo_route_max_len).from(identity) orelse return null,
-            .label = Array(discussion_label_route_max_len).from(label) orelse return null,
             .selected = Array(evt.event_id_size * 2).from(selected) orelse return null,
         } };
     }
 
     // build the default list route for a thread event kind.
-    pub fn repoThreadRoute(kind: evt.EventKind, identity: []const u8, label: []const u8, selected: []const u8) ?RoutablePage {
+    pub fn repoThreadRoute(kind: evt.EventKind, identity: []const u8, selected: []const u8) ?RoutablePage {
         return switch (kind) {
-            .issue => repoIssuesRoute(identity, .open, label, selected),
-            .patch => repoPatchesRoute(identity, .open, label, selected),
-            .discuss => repoDiscussionsRoute(identity, label, selected),
+            .issue => repoIssuesRoute(identity, .open, selected),
+            .patch => repoPatchesRoute(identity, .open, selected),
+            .discuss => repoDiscussionsRoute(identity, selected),
             else => null,
         };
     }
 
     // build a selected thread route at one of its comment windows.
     pub fn repoThreadCommentsRoute(kind: evt.EventKind, identity: []const u8, selected: []const u8, start: usize) ?RoutablePage {
-        var route = repoThreadRoute(kind, identity, "", selected) orelse return null;
+        var route = repoThreadRoute(kind, identity, selected) orelse return null;
         switch (route) {
             .repo_issues => |*thread| thread.comments_start = start,
             .repo_patches => |*thread| thread.comments_start = start,
@@ -984,9 +937,9 @@ pub const RoutablePage = union(enum) {
         return route;
     }
 
-    // build a thread labels route, keeping its url-encoded label filter.
-    pub fn repoThreadLabelsRoute(kind: evt.EventKind, identity: []const u8, label: []const u8) ?RoutablePage {
-        var route = repoThreadRoute(kind, identity, label, "") orelse return null;
+    // build a thread labels route.
+    pub fn repoThreadLabelsRoute(kind: evt.EventKind, identity: []const u8) ?RoutablePage {
+        var route = repoThreadRoute(kind, identity, "") orelse return null;
         switch (route) {
             .repo_issues => |*thread| thread.view = .labels,
             .repo_patches => |*thread| thread.view = .labels,
@@ -998,7 +951,7 @@ pub const RoutablePage = union(enum) {
 
     // build a new-thread form route.
     pub fn repoThreadNewRoute(kind: evt.EventKind, identity: []const u8) ?RoutablePage {
-        var route = repoThreadRoute(kind, identity, "", "") orelse return null;
+        var route = repoThreadRoute(kind, identity, "") orelse return null;
         switch (route) {
             .repo_issues => |*thread| thread.view = .new,
             .repo_patches => |*thread| thread.view = .new,
@@ -1011,7 +964,7 @@ pub const RoutablePage = union(enum) {
     // build the edit form route for a thread.
     pub fn repoThreadEditRoute(kind: evt.EventKind, identity: []const u8, selected: []const u8) ?RoutablePage {
         if (selected.len == 0) return null;
-        var route = repoThreadRoute(kind, identity, "", selected) orelse return null;
+        var route = repoThreadRoute(kind, identity, selected) orelse return null;
         switch (route) {
             .repo_issues => |*thread| thread.view = .edit,
             .repo_patches => |*thread| thread.view = .edit,
@@ -1024,7 +977,7 @@ pub const RoutablePage = union(enum) {
     // build a route showing a thread's whole description.
     pub fn repoThreadDescriptionRoute(kind: evt.EventKind, identity: []const u8, selected: []const u8) ?RoutablePage {
         if (selected.len == 0) return null;
-        var route = repoThreadRoute(kind, identity, "", selected) orelse return null;
+        var route = repoThreadRoute(kind, identity, selected) orelse return null;
         switch (route) {
             .repo_issues => |*thread| thread.view = .description,
             .repo_patches => |*thread| thread.view = .description,
@@ -1202,15 +1155,15 @@ pub const RoutablePage = union(enum) {
                     try arena.allocator().print("{s}/" ++ issue_seg ++ "{s}/" ++ comment_seg ++ "{s}/" ++ start_seg ++ "{d}", .{ prefix, i.selected.slice(), i.comment.slice(), i.comments_start });
                 var out: std.Io.Writer.Allocating = .init(arena.allocator());
                 // the list the thread is selected in stays filtered, so paging
-                // and reloading keep the label and the query
+                // and reloading keep the query
                 if (i.selected.len != 0) {
                     try out.writer.print("{s}/" ++ issue_seg ++ "{s}", .{ prefix, i.selected.slice() });
-                    try writeListFilters(&out.writer, i.label.slice(), i.assignee.slice(), i.search.slice());
+                    if (i.search.len != 0) try out.writer.print("/" ++ search_seg ++ "{s}", .{i.search.slice()});
                     if (i.comments_start != 0) try out.writer.print("/" ++ start_seg ++ "{d}", .{i.comments_start});
                     break :blk out.written();
                 }
                 try out.writer.print("{s}/issues/{s}", .{ prefix, @tagName(i.view) });
-                try writeListFilters(&out.writer, i.label.slice(), i.assignee.slice(), i.search.slice());
+                if (i.search.len != 0) try out.writer.print("/" ++ search_seg ++ "{s}", .{i.search.slice()});
                 break :blk out.written();
             },
             .repo_patches => |p| blk: {
@@ -1242,15 +1195,15 @@ pub const RoutablePage = union(enum) {
                     try arena.allocator().print("{s}/" ++ patch_seg ++ "{s}/" ++ comment_seg ++ "{s}/" ++ start_seg ++ "{d}", .{ prefix, p.selected.slice(), p.comment.slice(), p.comments_start });
                 var out: std.Io.Writer.Allocating = .init(arena.allocator());
                 // the list the thread is selected in stays filtered, so paging
-                // and reloading keep the label and the query
+                // and reloading keep the query
                 if (p.selected.len != 0) {
                     try out.writer.print("{s}/" ++ patch_seg ++ "{s}", .{ prefix, p.selected.slice() });
-                    try writeListFilters(&out.writer, p.label.slice(), "", p.search.slice());
+                    if (p.search.len != 0) try out.writer.print("/" ++ search_seg ++ "{s}", .{p.search.slice()});
                     if (p.comments_start != 0) try out.writer.print("/" ++ start_seg ++ "{d}", .{p.comments_start});
                     break :blk out.written();
                 }
                 try out.writer.print("{s}/patches/{s}", .{ prefix, @tagName(p.view) });
-                try writeListFilters(&out.writer, p.label.slice(), "", p.search.slice());
+                if (p.search.len != 0) try out.writer.print("/" ++ search_seg ++ "{s}", .{p.search.slice()});
                 break :blk out.written();
             },
             .repo_discussions => |t| blk: {
@@ -1272,15 +1225,15 @@ pub const RoutablePage = union(enum) {
                     try arena.allocator().print("{s}/" ++ discuss_seg ++ "{s}/" ++ comment_seg ++ "{s}/" ++ start_seg ++ "{d}", .{ prefix, t.selected.slice(), t.comment.slice(), t.comments_start });
                 var out: std.Io.Writer.Allocating = .init(arena.allocator());
                 // the list the thread is selected in stays filtered, so paging
-                // and reloading keep the label and the query
+                // and reloading keep the query
                 if (t.selected.len != 0) {
                     try out.writer.print("{s}/" ++ discuss_seg ++ "{s}", .{ prefix, t.selected.slice() });
-                    try writeListFilters(&out.writer, t.label.slice(), "", t.search.slice());
+                    if (t.search.len != 0) try out.writer.print("/" ++ search_seg ++ "{s}", .{t.search.slice()});
                     if (t.comments_start != 0) try out.writer.print("/" ++ start_seg ++ "{d}", .{t.comments_start});
                     break :blk out.written();
                 }
                 try out.writer.print("{s}/discussions/{s}", .{ prefix, @tagName(t.view) });
-                try writeListFilters(&out.writer, t.label.slice(), "", t.search.slice());
+                if (t.search.len != 0) try out.writer.print("/" ++ search_seg ++ "{s}", .{t.search.slice()});
                 break :blk out.written();
             },
             .repo_undo => |u| blk: {
@@ -1645,8 +1598,8 @@ pub const RoutablePage = union(enum) {
                 }
                 return null;
             }
-            if (!params.only(&.{ .start, .label, .assignee, .search })) return null;
-            return withEncodedAssignee(withEncodedFilters(repoThreadCommentsRoute(.issue, pair, issue_id, params.start() orelse return null), params.values.get(.label) orelse "", params.values.get(.search) orelse ""), params.values.get(.assignee) orelse "");
+            if (!params.only(&.{ .start, .search })) return null;
+            return withEncodedSearch(repoThreadCommentsRoute(.issue, pair, issue_id, params.start() orelse return null), params.values.get(.search) orelse "");
         }
         if (std.mem.startsWith(u8, tab, patch_seg)) {
             const patch_id = tab[patch_seg.len..];
@@ -1682,8 +1635,8 @@ pub const RoutablePage = union(enum) {
                 }
                 return null;
             }
-            if (!params.only(&.{ .start, .label, .search })) return null;
-            return withEncodedFilters(repoThreadCommentsRoute(.patch, pair, patch_id, params.start() orelse return null), params.values.get(.label) orelse "", params.values.get(.search) orelse "");
+            if (!params.only(&.{ .start, .search })) return null;
+            return withEncodedSearch(repoThreadCommentsRoute(.patch, pair, patch_id, params.start() orelse return null), params.values.get(.search) orelse "");
         }
         if (std.mem.startsWith(u8, tab, discuss_seg)) {
             const discussion_id = tab[discuss_seg.len..];
@@ -1713,53 +1666,49 @@ pub const RoutablePage = union(enum) {
                 if (std.mem.eql(u8, tail, "description")) return if (params.only(&.{})) repoThreadDescriptionRoute(.discuss, pair, discussion_id) else null;
                 return null;
             }
-            if (!params.only(&.{ .start, .label, .search })) return null;
-            return withEncodedFilters(repoThreadCommentsRoute(.discuss, pair, discussion_id, params.start() orelse return null), params.values.get(.label) orelse "", params.values.get(.search) orelse "");
+            if (!params.only(&.{ .start, .search })) return null;
+            return withEncodedSearch(repoThreadCommentsRoute(.discuss, pair, discussion_id, params.start() orelse return null), params.values.get(.search) orelse "");
         }
         if (std.mem.eql(u8, tab, "issues")) {
             // the word is a list view; a filter with neither is never emitted.
             const word = params.scanTail(&segments) catch return null;
-            const label_value = params.values.get(.label) orelse "";
-            const w = word orelse return if (params.only(&.{})) repoIssuesRoute(pair, .open, "", "") else null;
+            const w = word orelse return if (params.only(&.{})) repoIssuesRoute(pair, .open, "") else null;
             // the conflicts list windows by an issue id, not a number, so it
             // reads the start param raw
             if (std.mem.eql(u8, w, "conflicts")) {
                 if (!params.only(&.{.start})) return null;
                 return repoIssuesConflictsRoute(pair, params.values.get(.start) orelse "");
             }
-            if (!params.only(&.{ .label, .assignee, .search })) return null;
+            if (!params.only(&.{.search})) return null;
             const search_value = params.values.get(.search) orelse "";
-            const assignee_value = params.values.get(.assignee) orelse "";
-            if (std.meta.stringToEnum(evt.Issue.Status, w)) |status| return withEncodedAssignee(withEncodedSearch(repoIssuesRoute(pair, status, label_value, ""), search_value), assignee_value);
-            if (std.mem.eql(u8, w, "labels")) return withEncodedAssignee(withEncodedSearch(repoThreadLabelsRoute(.issue, pair, label_value), search_value), assignee_value);
-            if (std.mem.eql(u8, w, "new")) return if (label_value.len == 0 and assignee_value.len == 0 and search_value.len == 0) repoThreadNewRoute(.issue, pair) else null;
+            if (std.meta.stringToEnum(evt.Issue.Status, w)) |status| return withEncodedSearch(repoIssuesRoute(pair, status, ""), search_value);
+            if (std.mem.eql(u8, w, "labels")) return withEncodedSearch(repoThreadLabelsRoute(.issue, pair), search_value);
+            if (std.mem.eql(u8, w, "new")) return if (search_value.len == 0) repoThreadNewRoute(.issue, pair) else null;
             return null;
         }
         if (std.mem.eql(u8, tab, "patches")) {
             const word = params.scanTail(&segments) catch return null;
-            const label_value = params.values.get(.label) orelse "";
-            const view = word orelse return if (params.only(&.{})) repoPatchesRoute(pair, .open, "", "") else null;
+            const view = word orelse return if (params.only(&.{})) repoPatchesRoute(pair, .open, "") else null;
             if (std.mem.eql(u8, view, "conflicts")) {
                 if (!params.only(&.{.start})) return null;
                 return repoPatchesConflictsRoute(pair, params.values.get(.start) orelse "");
             }
-            if (!params.only(&.{ .label, .search })) return null;
+            if (!params.only(&.{.search})) return null;
             const search_value = params.values.get(.search) orelse "";
-            if (std.meta.stringToEnum(evt.Patch.StatusKind, view)) |status| return withEncodedSearch(repoPatchesRoute(pair, status, label_value, ""), search_value);
-            if (std.mem.eql(u8, view, "labels")) return withEncodedSearch(repoThreadLabelsRoute(.patch, pair, label_value), search_value);
-            if (std.mem.eql(u8, view, "new")) return if (label_value.len == 0 and search_value.len == 0) repoThreadNewRoute(.patch, pair) else null;
-            if (std.mem.eql(u8, view, "drafts")) return if (label_value.len == 0 and search_value.len == 0) repoPatchesDraftsRoute(pair) else null;
+            if (std.meta.stringToEnum(evt.Patch.StatusKind, view)) |status| return withEncodedSearch(repoPatchesRoute(pair, status, ""), search_value);
+            if (std.mem.eql(u8, view, "labels")) return withEncodedSearch(repoThreadLabelsRoute(.patch, pair), search_value);
+            if (std.mem.eql(u8, view, "new")) return if (search_value.len == 0) repoThreadNewRoute(.patch, pair) else null;
+            if (std.mem.eql(u8, view, "drafts")) return if (search_value.len == 0) repoPatchesDraftsRoute(pair) else null;
             return null;
         }
         if (std.mem.eql(u8, tab, "discussions")) {
             const word = params.scanTail(&segments) catch return null;
-            const label_value = params.values.get(.label) orelse "";
-            const view = word orelse return if (params.only(&.{})) repoDiscussionsRoute(pair, "", "") else null;
-            if (!params.only(&.{ .label, .search })) return null;
+            const view = word orelse return if (params.only(&.{})) repoDiscussionsRoute(pair, "") else null;
+            if (!params.only(&.{.search})) return null;
             const search_value = params.values.get(.search) orelse "";
-            if (std.mem.eql(u8, view, "recent")) return withEncodedSearch(repoDiscussionsRoute(pair, label_value, ""), search_value);
-            if (std.mem.eql(u8, view, "labels")) return withEncodedSearch(repoThreadLabelsRoute(.discuss, pair, label_value), search_value);
-            if (std.mem.eql(u8, view, "new")) return if (label_value.len == 0 and search_value.len == 0) repoThreadNewRoute(.discuss, pair) else null;
+            if (std.mem.eql(u8, view, "recent")) return withEncodedSearch(repoDiscussionsRoute(pair, ""), search_value);
+            if (std.mem.eql(u8, view, "labels")) return withEncodedSearch(repoThreadLabelsRoute(.discuss, pair), search_value);
+            if (std.mem.eql(u8, view, "new")) return if (search_value.len == 0) repoThreadNewRoute(.discuss, pair) else null;
             return null;
         }
         if (std.mem.eql(u8, tab, "undo")) {
@@ -1886,8 +1835,6 @@ pub const RoutablePage = union(enum) {
                 a_d.start == b.repo_diff.start and std.mem.eql(u8, a_d.path.slice(), b.repo_diff.path.slice()),
             .repo_refs => |a_r| std.mem.eql(u8, a_r.name.slice(), b.repo_refs.name.slice()) and a_r.kind == b.repo_refs.kind and std.mem.eql(u8, a_r.from.slice(), b.repo_refs.from.slice()) and std.mem.eql(u8, a_r.search.slice(), b.repo_refs.search.slice()),
             .repo_issues => |a_i| std.mem.eql(u8, a_i.name.slice(), b.repo_issues.name.slice()) and
-                std.mem.eql(u8, a_i.label.slice(), b.repo_issues.label.slice()) and
-                std.mem.eql(u8, a_i.assignee.slice(), b.repo_issues.assignee.slice()) and
                 std.mem.eql(u8, a_i.search.slice(), b.repo_issues.search.slice()) and
                 std.mem.eql(u8, a_i.selected.slice(), b.repo_issues.selected.slice()) and
                 std.mem.eql(u8, a_i.theirs.slice(), b.repo_issues.theirs.slice()) and
@@ -1895,14 +1842,12 @@ pub const RoutablePage = union(enum) {
                 a_i.comments_start == b.repo_issues.comments_start and
                 std.mem.eql(u8, a_i.comment.slice(), b.repo_issues.comment.slice()),
             .repo_discussions => |a_t| std.mem.eql(u8, a_t.name.slice(), b.repo_discussions.name.slice()) and
-                std.mem.eql(u8, a_t.label.slice(), b.repo_discussions.label.slice()) and
                 std.mem.eql(u8, a_t.search.slice(), b.repo_discussions.search.slice()) and
                 std.mem.eql(u8, a_t.selected.slice(), b.repo_discussions.selected.slice()) and
                 a_t.view == b.repo_discussions.view and
                 a_t.comments_start == b.repo_discussions.comments_start and
                 std.mem.eql(u8, a_t.comment.slice(), b.repo_discussions.comment.slice()),
             .repo_patches => |a_p| std.mem.eql(u8, a_p.name.slice(), b.repo_patches.name.slice()) and
-                std.mem.eql(u8, a_p.label.slice(), b.repo_patches.label.slice()) and
                 std.mem.eql(u8, a_p.search.slice(), b.repo_patches.search.slice()) and
                 std.mem.eql(u8, a_p.selected.slice(), b.repo_patches.selected.slice()) and
                 std.mem.eql(u8, a_p.theirs.slice(), b.repo_patches.theirs.slice()) and

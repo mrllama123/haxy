@@ -126,10 +126,6 @@ pub fn init(
         .repo_refs => |*r| r.search.slice(),
         else => "",
     };
-    const discussions_label: []const u8 = switch (route) {
-        .repo_discussions => |*t| t.label.slice(),
-        else => "",
-    };
     const discussions_search: []const u8 = switch (route) {
         .repo_discussions => |*t| t.search.slice(),
         else => "",
@@ -150,16 +146,8 @@ pub fn init(
         .repo_discussions => |t| t.comments_start,
         else => 0,
     };
-    // the issues tab's label filter, the issue its window is rooted at, and the
-    // view it shows.
-    const issues_label: []const u8 = switch (route) {
-        .repo_issues => |*i| i.label.slice(),
-        else => "",
-    };
-    const issues_assignee: []const u8 = switch (route) {
-        .repo_issues => |*i| i.assignee.slice(),
-        else => "",
-    };
+    // the issues tab's search, the issue its window is rooted at, and the view
+    // it shows.
     const issues_search: []const u8 = switch (route) {
         .repo_issues => |*i| i.search.slice(),
         else => "",
@@ -183,10 +171,6 @@ pub fn init(
     const issues_comments_start: usize = switch (route) {
         .repo_issues => |i| i.comments_start,
         else => 0,
-    };
-    const patches_label: []const u8 = switch (route) {
-        .repo_patches => |*p| p.label.slice(),
-        else => "",
     };
     const patches_search: []const u8 = switch (route) {
         .repo_patches => |*p| p.search.slice(),
@@ -367,9 +351,9 @@ pub fn init(
                                 break :diff .{ .diff = try Diff.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, diff_route.repo_diff) };
                             } else .{ .commits = try Commits.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, session.haxy_moment, handle, ref_or_oid, ref_value, commits_message, base_oid, commits_search, commits_from) };
                             const target_branch = if (files_data.ref_or_oid == .branch) files_data.ref_or_oid_value else "";
-                            var discussions_data = try Discussions.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, discussions_label, discussions_search, discussions_selected, discussions_comment, discussions_comments_start, discussions_view, tabViewer(handle, repo, .discuss));
-                            var issues_data = try Issues.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, issues_label, issues_assignee, issues_search, issues_selected, issues_comment, issues_comments_start, issues_theirs, issues_view, tabViewer(handle, repo, .issue));
-                            var patches_data = try Patches.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, session, repo_id_maybe, repo_identity.identity, target_branch, patches_label, patches_search, patches_selected, patches_comment, patches_comments_start, patches_theirs, patches_view, tabViewer(handle, repo, .patch));
+                            var discussions_data = try Discussions.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, discussions_search, discussions_selected, discussions_comment, discussions_comments_start, discussions_view, tabViewer(handle, repo, .discuss));
+                            var issues_data = try Issues.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, issues_search, issues_selected, issues_comment, issues_comments_start, issues_theirs, issues_view, tabViewer(handle, repo, .issue));
+                            var patches_data = try Patches.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, session, repo_id_maybe, repo_identity.identity, target_branch, patches_search, patches_selected, patches_comment, patches_comments_start, patches_theirs, patches_view, tabViewer(handle, repo, .patch));
                             if (repo_kind == .xit and session.data.host_kind == .server) {
                                 // a server page always resolved its repo id
                                 const repo_id = repo_id_maybe orelse unreachable;
@@ -396,9 +380,9 @@ pub fn init(
             try Files.emptyResult(aa, handle, requested_ref_or_oid orelse .branch, requested_ref_value, files_dir),
             Changes{ .commits = try Commits.emptyResult(aa, handle, requested_ref_or_oid orelse .branch, requested_ref_value, commits_base_oid) },
             try Refs.emptyResult(arena, repo_identity.identity, refs_kind, refs_from, refs_search),
-            try Discussions.emptyResult(aa, repo_identity.identity, discussions_label, discussions_search, discussions_selected, discussions_comment, discussions_comments_start, discussions_view),
-            try Issues.emptyResult(aa, repo_identity.identity, issues_label, issues_assignee, issues_search, issues_selected, issues_comment, issues_comments_start, issues_theirs, issues_view),
-            try Patches.emptyResult(aa, repo_identity.identity, patches_label, patches_search, patches_selected, patches_comment, patches_comments_start, patches_theirs, patches_view),
+            try Discussions.emptyResult(aa, repo_identity.identity, discussions_search, discussions_selected, discussions_comment, discussions_comments_start, discussions_view),
+            try Issues.emptyResult(aa, repo_identity.identity, issues_search, issues_selected, issues_comment, issues_comments_start, issues_theirs, issues_view),
+            try Patches.emptyResult(aa, repo_identity.identity, patches_search, patches_selected, patches_comment, patches_comments_start, patches_theirs, patches_view),
             try Events.empty(aa, repo_identity.identity, events_view, session.local != null, session.data.sync_failure),
         };
     };
@@ -412,7 +396,7 @@ pub fn init(
 
     return .{
         // use the files tab's resolved ref for the header
-        .header = try Header.init(arena, repo.event.name, owner_name, files.ref_or_oid, files.ref_or_oid_value, discussions.label, issues.label, patches.label),
+        .header = try Header.init(arena, repo.event.name, owner_name, files.ref_or_oid, files.ref_or_oid_value, discussions.search, issues.search, patches.search),
         .repo = repo,
         .handle = handle,
         .files = files,

@@ -1043,11 +1043,15 @@ pub const SearchBox = struct {
     text_input: wgt.TextInput,
     session: *ui.Session,
 
+    // the text width, narrowed toward the minimum when the row is tight
+    const min_width = 18;
+    const max_width = 30;
+
     // the room the box asks its row for
-    pub const min_size: layout.MaybeSize = .{ .width = 20, .height = 3 };
+    pub const min_size: layout.MaybeSize = .{ .width = min_width + 2, .height = 3 };
 
     pub fn init(allocator: std.mem.Allocator, session: *ui.Session, label: []const u8, name: []const u8, text_value: ?[]const u8) !SearchBox {
-        var text_input = try wgt.TextInput.init(allocator, .{ .top_label = .{ .text = label }, .name = name, .round_corners = true, .visible_width = 18, .render_content = session.is_terminal });
+        var text_input = try wgt.TextInput.init(allocator, .{ .top_label = .{ .text = label }, .name = name, .round_corners = true, .visible_width = max_width, .render_content = session.is_terminal });
         errdefer text_input.deinit(allocator);
         text_input.getFocus().mode = .all;
         if (text_value) |value| try text_input.setContent(allocator, value);
@@ -1059,6 +1063,9 @@ pub const SearchBox = struct {
     }
 
     pub fn build(self: *SearchBox, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
+        // the row leaves room for its other children's minimums, so this is what can be spared
+        const room = (constraint.max_size.width orelse max_width + 2) -| 2;
+        self.text_input.options.visible_width = std.math.clamp(room, min_width, max_width);
         self.text_input.options.bottom_label.text = if (root_focus.grandchild_id == self.getFocus().id) " press enter " else "";
         try self.text_input.build(allocator, constraint, root_focus);
         if (!self.session.is_terminal) {

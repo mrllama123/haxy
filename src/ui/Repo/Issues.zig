@@ -9,6 +9,7 @@ const diff3 = @import("../../diff3.zig");
 const Comment = @import("Comment.zig");
 const Attachment = @import("Attachment.zig");
 const thread = ui.widget.thread;
+const srch_thrd = @import("../../search_thread.zig");
 
 const wasm = builtin.target.cpu.arch == .wasm32;
 
@@ -80,14 +81,10 @@ pub const Window = struct {
 
 // "owner:name", so the view can build /owner:name/issues/... links.
 identity: []const u8,
-// the url-encoded label the lists are filtered to ("" = unfiltered).
-label: []const u8,
-// the url-encoded name or email the lists are filtered to, as typed ("" = unfiltered).
-assignee: []const u8,
-// false when the assignee names no user or no assigned issue, which lists nothing
-assignee_found: bool = true,
 // the decoded query the lists are filtered to, or null when unfiltered.
 search: ?[]const u8 = null,
+// whether an assignee term names no user, which lists nothing
+assignee_unknown: bool = false,
 // the hex event id of the issue its status's window is rooted at ("" = the
 // first window), mirrored into the url.
 selected_id: []const u8,
@@ -131,8 +128,8 @@ pub fn statusKind(event: Event) Status {
     return event.status;
 }
 
-pub fn listRoute(identity: []const u8, status: Status, label: []const u8, selected: []const u8) ?ui.RoutablePage {
-    return ui.RoutablePage.repoIssuesRoute(identity, status, label, selected);
+pub fn listRoute(identity: []const u8, status: Status, selected: []const u8) ?ui.RoutablePage {
+    return ui.RoutablePage.repoIssuesRoute(identity, status, selected);
 }
 
 pub fn conflictsRoute(identity: []const u8, selected: []const u8) ?ui.RoutablePage {
@@ -173,11 +170,9 @@ pub fn selectedThread(self: *const Self) ?*const IssueWithId {
 }
 
 // an empty listing, for the wasm / no-repo paths.
-pub fn emptyResult(aa: std.mem.Allocator, identity: []const u8, label: []const u8, assignee: []const u8, search: []const u8, selected_id: []const u8, comment_id: []const u8, comments_start: usize, theirs_picks: []const u8, view: ui.RoutablePage.IssuesView) !Self {
+pub fn emptyResult(aa: std.mem.Allocator, identity: []const u8, search: []const u8, selected_id: []const u8, comment_id: []const u8, comments_start: usize, theirs_picks: []const u8, view: ui.RoutablePage.IssuesView) !Self {
     return .{
         .identity = try aa.dupe(u8, identity),
-        .label = try aa.dupe(u8, label),
-        .assignee = try aa.dupe(u8, assignee),
         .search = if (search.len == 0) null else std.Uri.percentDecodeInPlace(try aa.dupe(u8, search)),
         .selected_id = try aa.dupe(u8, selected_id),
         .comment_id = try aa.dupe(u8, comment_id),
@@ -198,8 +193,8 @@ pub fn emptyResult(aa: std.mem.Allocator, identity: []const u8, label: []const u
     };
 }
 
-// read one window per status of an opened repo's issues (filtered to `label`
-// and `assignee` when set), ordered by creation (newest first). the window of
+// read one window per status of an opened repo's issues (filtered to the
+// search when set), ordered by creation (newest first). the window of
 // the issue `selected_id` names starts at it ("" = the beginning). a git repo reads the
 // event db next to it (synced from the events branch on each page build); a
 // xit repo reads its own db.
@@ -213,8 +208,6 @@ pub fn init(
     // in local mode, which has no users)
     admin_moment: ?evt.AdminDB.HashMap(.read_only),
     identity: []const u8,
-    label: []const u8,
-    assignee: []const u8,
     search: []const u8,
     selected_id: []const u8,
     comment_id: []const u8,
@@ -223,17 +216,15 @@ pub fn init(
     view: ui.RoutablePage.IssuesView,
     viewer: ?ui.Viewer,
 ) !Self {
-    var empty = try emptyResult(arena.allocator(), identity, label, assignee, search, selected_id, comment_id, comments_start, theirs_picks, view);
+    var empty = try emptyResult(arena.allocator(), identity, search, selected_id, comment_id, comments_start, theirs_picks, view);
     // the early returns below still let the viewer write
     empty.viewer = viewer;
 
     const aa = arena.allocator();
     const DB = evt.EventDB(repo_opts.hash);
+    // an explicitly named issue that doesn't exist is a bad url (NotFound ->
+    // 404); the bare route falls through to an empty listing.
     const rooted = empty.selected_id.len != 0;
-    const labeled = empty.label.len != 0;
-    // an explicitly named issue or label that doesn't exist is a bad url
-    // (NotFound -> 404); the bare route falls through to an empty listing.
-    const strict = rooted or labeled;
 
     // a repo with no consumed events has no moment yet.
     const gpa = arena.child_allocator;
@@ -245,51 +236,38 @@ pub fn init(
         return empty
     else
         evt.currentMoment(repo_opts, repo)) catch {
-        if (strict) return error.NotFound;
+        if (rooted) return error.NotFound;
         return empty;
     };
 
-    // the sorted sets to window, per status: the label's sets when filtered,
-    // else the top-level per-status sets. a missing set is an empty window.
-    var open_set: ?DB.SortedSet(.read_only) = null;
-    var closed_set: ?DB.SortedSet(.read_only) = null;
-    if (labeled) {
-        const label_to_issues_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Issue.label_status_to_id_set_key)) orelse return error.NotFound;
-        const label_to_issues = try DB.SortedMap(.read_only).init(label_to_issues_cursor);
-        const decoded = std.Uri.percentDecodeInPlace(try aa.dupe(u8, empty.label));
-        open_set = try thread.labelStatusSet(Self, DB, label_to_issues, decoded, .open);
-        closed_set = try thread.labelStatusSet(Self, DB, label_to_issues, decoded, .closed);
-        // a label no issue carries is a bad url
-        if (open_set == null and closed_set == null) return error.NotFound;
-    } else if (try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Issue.status_to_id_set_key))) |status_to_issues_cursor| {
-        const status_to_issues = try DB.SortedMap(.read_only).init(status_to_issues_cursor);
-        open_set = try thread.statusSet(Self, DB, status_to_issues, .open);
-        closed_set = try thread.statusSet(Self, DB, status_to_issues, .closed);
-    } else if (rooted) return error.NotFound;
+    const filters = try srch_thrd.parseFilters(aa, empty.search orelse "");
 
-    // the assignee's issues, intersected with each status's set when windowed.
     // a name resolves to its user's email. an unknown name or an email no
-    // issue carries lists nothing and marks the box, like the assign input.
-    var assignee_set: ?DB.SortedSet(.read_only) = null;
-    const assignee_found = empty.assignee.len == 0 or found: {
-        const decoded = std.Uri.percentDecodeInPlace(try aa.dupe(u8, empty.assignee));
-        const email = switch (try ui.assigneeEmail(admin_moment, arena, decoded)) {
-            .email => |email| email,
-            .failure => break :found false,
-        };
-        const by_assignee_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Assignment.assignee_to_issue_id_set_key)) orelse break :found false;
-        const by_assignee = try DB.HashMap(.read_only).init(by_assignee_cursor);
-        const set_cursor = try by_assignee.getCursor(hash.hashInt(repo_opts.hash, email)) orelse break :found false;
-        assignee_set = try DB.SortedSet(.read_only).init(set_cursor);
-        break :found true;
-    };
-    if (!assignee_found) {
-        open_set = null;
-        closed_set = null;
+    // issue carries lists nothing.
+    var assignee_sets: ?[]const DB.SortedSet(.read_only) = &.{};
+    if (filters.assignees.len != 0) {
+        const by_assignee: ?DB.HashMap(.read_only) = if (try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Assignment.assignee_to_issue_id_set_key))) |cursor| try DB.HashMap(.read_only).init(cursor) else null;
+        var sets: std.ArrayList(DB.SortedSet(.read_only)) = .empty;
+        for (filters.assignees) |assignee| {
+            const email = switch (try ui.assigneeEmail(admin_moment, arena, assignee)) {
+                .email => |email| email,
+                .failure => {
+                    empty.assignee_unknown = true;
+                    continue;
+                },
+            };
+            const set_cursor = (if (by_assignee) |map| try map.getCursor(hash.hashInt(repo_opts.hash, email)) else null) orelse continue;
+            try sets.append(aa, try DB.SortedSet(.read_only).init(set_cursor));
+        }
+        assignee_sets = if (sets.items.len == filters.assignees.len) sets.items else null;
     }
 
+    // each status's listing intersects every filter's set
+    const open_sets = try thread.statusSets(Self, repo_opts.hash, aa, haxy_moment, filters.labels, assignee_sets, .open);
+    const closed_sets = try thread.statusSets(Self, repo_opts.hash, aa, haxy_moment, filters.labels, assignee_sets, .closed);
+
     const event_id_to_issue_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Issue.record_map_key)) orelse {
-        if (strict) return error.NotFound;
+        if (rooted) return error.NotFound;
         return empty;
     };
     const event_id_to_issue = try DB.HashMap(.read_only).init(event_id_to_issue_cursor);
@@ -323,14 +301,13 @@ pub fn init(
             if (!try set.contains(order_key)) return error.NotFound;
             conflicts_root = order_key;
         } else {
-            // the named issue must be in its windowed set (a label url can name
-            // an issue that doesn't carry the label).
-            const set = (switch (issue_event.event.status) {
-                .open => open_set,
-                .closed => closed_set,
-            }) orelse return error.NotFound;
-            if (!try set.contains(order_key)) return error.NotFound;
-            if (assignee_set) |assignee_issues| if (!try assignee_issues.contains(order_key)) return error.NotFound;
+            // the named issue must be in every set its window intersects (a
+            // filtered url can name an issue the filters leave out).
+            const sets = switch (issue_event.event.status) {
+                .open => open_sets,
+                .closed => closed_sets,
+            };
+            if (!try thread.inEverySet(DB, sets, order_key)) return error.NotFound;
 
             switch (issue_event.event.status) {
                 .open => open_root = order_key,
@@ -361,9 +338,9 @@ pub fn init(
     }
 
     const thread_comments_start = if (empty.comment_id.len == 0) comments_start else 0;
-    const open_window = try thread.loadWindow(Self, .issue, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_issue, open_set, open_root, conflict_set, empty.selected_id, thread_comments_start, empty.search, assignee_set, viewer);
-    const closed_window = try thread.loadWindow(Self, .issue, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_issue, closed_set, closed_root, conflict_set, empty.selected_id, thread_comments_start, empty.search, assignee_set, viewer);
-    const conflicts_window = try thread.loadWindow(Self, .issue, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_issue, conflict_set, conflicts_root, conflict_set, empty.selected_id, thread_comments_start, null, null, viewer);
+    const open_window = try thread.loadWindow(Self, .issue, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_issue, open_sets, open_root, conflict_set, empty.selected_id, thread_comments_start, filters.words, viewer);
+    const closed_window = try thread.loadWindow(Self, .issue, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_issue, closed_sets, closed_root, conflict_set, empty.selected_id, thread_comments_start, filters.words, viewer);
+    const conflicts_window = try thread.loadWindow(Self, .issue, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_issue, if (conflict_set) |*set| set[0..1] else &.{}, conflicts_root, conflict_set, empty.selected_id, thread_comments_start, "", viewer);
     if (view == .conflicts and conflicts_window.count > 0) resolved_view = .conflicts;
 
     const comment_page = if (empty.comment_id.len == 0)
@@ -375,10 +352,8 @@ pub fn init(
 
     return .{
         .identity = empty.identity,
-        .label = empty.label,
-        .assignee = empty.assignee,
-        .assignee_found = assignee_found,
         .search = empty.search,
+        .assignee_unknown = empty.assignee_unknown,
         .selected_id = empty.selected_id,
         .comment_id = empty.comment_id,
         .comments_start = comments_start,
@@ -413,10 +388,7 @@ const conflicts_tab_label = "conflicts";
 
 // tabs switching between the issues page's views
 pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *const Self) !Header {
-    var header = try Header.init(allocator, session, data.search, .{
-        .label = if (data.assignee_found) " assignee " else " assignee (not found) ",
-        .text = std.Uri.percentDecodeInPlace(try session.page_arena.allocator().dupe(u8, data.assignee)),
-    });
+    var header = try Header.init(allocator, session, data.search, if (data.assignee_unknown) " search (assignee not found) " else " search ");
     errdefer header.deinit(allocator);
     const selected_index = View.viewIndex(data.view);
     const page_selected = std.meta.activeTag(session.data.current_page) == .repo_issues;
@@ -424,7 +396,7 @@ pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *con
     // a list tab per status, labeled with its listing's issue count
     const status_labels = [_][]const u8{ open_tab_label, closed_tab_label };
     for ([_]evt.Issue.Status{ .open, .closed }, status_labels, 0..) |status, status_label, index| {
-        const route = try thread.searchRoute(ui.RoutablePage.withEncodedAssignee(ui.RoutablePage.repoIssuesRoute(data.identity, status, data.label, ""), data.assignee), data.search);
+        const route = try thread.searchRoute(ui.RoutablePage.repoIssuesRoute(data.identity, status, ""), data.search);
         const link = try ui.inPageTabLink(session, route, page_selected and selected_index == index);
         var label_buf: [64]u8 = undefined;
         const label = try thread.countLabel(&label_buf, status_label, data.window(status).*);
@@ -433,7 +405,7 @@ pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *con
 
     // labels tab
     {
-        const labels_route = try thread.searchRoute(ui.RoutablePage.withEncodedAssignee(ui.RoutablePage.repoThreadLabelsRoute(.issue, data.identity, data.label), data.assignee), data.search);
+        const labels_route = try thread.searchRoute(ui.RoutablePage.repoThreadLabelsRoute(.issue, data.identity), data.search);
         const labels_link = try ui.inPageTabLink(session, labels_route, page_selected and selected_index == View.viewIndex(.labels));
         try header.addTab(allocator, labels_tab_label, labels_link, View.viewIndex(.labels));
     }

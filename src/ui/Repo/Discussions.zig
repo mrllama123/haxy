@@ -8,6 +8,7 @@ const hash = xit.hash;
 const Comment = @import("Comment.zig");
 const Attachment = @import("Attachment.zig");
 const thread = ui.widget.thread;
+const srch_thrd = @import("../../search_thread.zig");
 
 const wasm = builtin.target.cpu.arch == .wasm32;
 
@@ -46,7 +47,6 @@ pub const Window = struct {
 };
 
 identity: []const u8,
-label: []const u8,
 // the decoded query the list is filtered to, or null when unfiltered.
 search: ?[]const u8 = null,
 selected_id: []const u8,
@@ -69,8 +69,8 @@ pub const ViewKind = ui.RoutablePage.DiscussionsView;
 pub const thread_name = "discussion";
 pub const header_widget_name = "repo_discussions_header";
 
-pub fn listRoute(identity: []const u8, _: Status, label: []const u8, selected: []const u8) ?ui.RoutablePage {
-    return ui.RoutablePage.repoDiscussionsRoute(identity, label, selected);
+pub fn listRoute(identity: []const u8, _: Status, selected: []const u8) ?ui.RoutablePage {
+    return ui.RoutablePage.repoDiscussionsRoute(identity, selected);
 }
 
 pub fn selectedThread(self: *const Self) ?*const DiscussionWithId {
@@ -88,7 +88,6 @@ pub fn window(self: *const Self, _: Status) *const Window {
 pub fn emptyResult(
     aa: std.mem.Allocator,
     identity: []const u8,
-    label: []const u8,
     search: []const u8,
     selected_id: []const u8,
     comment_id: []const u8,
@@ -97,7 +96,6 @@ pub fn emptyResult(
 ) !Self {
     return .{
         .identity = try aa.dupe(u8, identity),
-        .label = try aa.dupe(u8, label),
         .search = if (search.len == 0) null else std.Uri.percentDecodeInPlace(try aa.dupe(u8, search)),
         .selected_id = try aa.dupe(u8, selected_id),
         .comment_id = try aa.dupe(u8, comment_id),
@@ -117,7 +115,6 @@ pub fn init(
     io: std.Io,
     admin_moment: ?evt.AdminDB.HashMap(.read_only),
     identity: []const u8,
-    label: []const u8,
     search: []const u8,
     selected_id: []const u8,
     comment_id: []const u8,
@@ -125,14 +122,12 @@ pub fn init(
     view: ui.RoutablePage.DiscussionsView,
     viewer: ?ui.Viewer,
 ) !Self {
-    var empty = try emptyResult(arena.allocator(), identity, label, search, selected_id, comment_id, comments_start, view);
+    var empty = try emptyResult(arena.allocator(), identity, search, selected_id, comment_id, comments_start, view);
     // the early returns below still let the viewer write
     empty.viewer = viewer;
     const aa = arena.allocator();
     const DB = evt.EventDB(repo_opts.hash);
     const rooted = empty.selected_id.len != 0;
-    const labeled = empty.label.len != 0;
-    const strict = rooted or labeled;
 
     const gpa = arena.child_allocator;
     var event_db_maybe: ?evt.LocalEventDB(repo_opts.hash) = if (repo_kind == .git) try evt.LocalEventDB(repo_opts.hash).openReadOnly(io, gpa, repo.core.repo_dir) else null;
@@ -143,23 +138,33 @@ pub fn init(
         return empty
     else
         evt.currentMoment(repo_opts, repo)) catch {
-        if (strict) return error.NotFound;
+        if (rooted) return error.NotFound;
         return empty;
     };
 
-    const set_maybe: ?DB.SortedSet(.read_only) = if (labeled) blk: {
-        const labels_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Discussion.label_to_id_set_key)) orelse return error.NotFound;
-        const label_sets = try DB.SortedMap(.read_only).init(labels_cursor);
-        const decoded = std.Uri.percentDecodeInPlace(try aa.dupe(u8, empty.label));
-        const cursor = try label_sets.getCursor(decoded) orelse return error.NotFound;
-        break :blk try DB.SortedSet(.read_only).init(cursor);
-    } else if (try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Discussion.active_id_set_key))) |cursor|
-        try DB.SortedSet(.read_only).init(cursor)
-    else
-        null;
+    // the listing intersects every label's set, or is the active set without
+    // labels, since each label's set lies within it. discussions have no
+    // assignees, so an assignee term lists nothing.
+    const filters = try srch_thrd.parseFilters(aa, empty.search orelse "");
+    const sets: []const DB.SortedSet(.read_only) = blk: {
+        if (filters.assignees.len != 0) break :blk &.{};
+        var list: std.ArrayList(DB.SortedSet(.read_only)) = .empty;
+        if (filters.labels.len == 0) {
+            const active_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Discussion.active_id_set_key)) orelse break :blk &.{};
+            try list.append(aa, try DB.SortedSet(.read_only).init(active_cursor));
+        } else {
+            const labels_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Discussion.label_to_id_set_key)) orelse break :blk &.{};
+            const label_sets = try DB.SortedMap(.read_only).init(labels_cursor);
+            for (filters.labels) |label| {
+                const cursor = try label_sets.getCursor(label) orelse break :blk &.{};
+                try list.append(aa, try DB.SortedSet(.read_only).init(cursor));
+            }
+        }
+        break :blk list.items;
+    };
 
     const records_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Discussion.record_map_key)) orelse {
-        if (strict) return error.NotFound;
+        if (rooted) return error.NotFound;
         return empty;
     };
     const records = try DB.HashMap(.read_only).init(records_cursor);
@@ -172,13 +177,12 @@ pub fn init(
         if (record.removed) return error.NotFound;
         const activity_order = try evt.Discussion.activityOrder(DB, repo_opts.hash, haxy_moment, &id);
         const order_key = try aa.dupe(u8, &evt.orderKeyDesc(activity_order, &id));
-        const set = set_maybe orelse return error.NotFound;
-        if (!try set.contains(order_key)) return error.NotFound;
+        if (!try thread.inEverySet(DB, sets, order_key)) return error.NotFound;
         root_key = order_key;
     }
 
     const discussion_comments_start = if (empty.comment_id.len == 0) comments_start else 0;
-    const loaded_window = try thread.loadWindow(Self, .discuss, repo_opts.hash, arena, admin_moment, haxy_moment, records, set_maybe, root_key, null, empty.selected_id, discussion_comments_start, empty.search, null, viewer);
+    const loaded_window = try thread.loadWindow(Self, .discuss, repo_opts.hash, arena, admin_moment, haxy_moment, records, sets, root_key, null, empty.selected_id, discussion_comments_start, filters.words, viewer);
     const comment_page = if (empty.comment_id.len == 0)
         null
     else
@@ -198,7 +202,6 @@ pub fn init(
 
     return .{
         .identity = empty.identity,
-        .label = empty.label,
         .search = empty.search,
         .selected_id = empty.selected_id,
         .comment_id = empty.comment_id,
@@ -227,14 +230,14 @@ const new_tab_label = "new";
 
 // tabs switching between the discussions page's views
 pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *const Self) !Header {
-    var header = try Header.init(allocator, session, data.search, null);
+    var header = try Header.init(allocator, session, data.search, " search ");
     errdefer header.deinit(allocator);
     const selected_index = View.viewIndex(data.view);
     const page_selected = std.meta.activeTag(session.data.current_page) == .repo_discussions;
 
     // recent discussions
     {
-        const route = try thread.searchRoute(ui.RoutablePage.repoDiscussionsRoute(data.identity, data.label, ""), data.search);
+        const route = try thread.searchRoute(ui.RoutablePage.repoDiscussionsRoute(data.identity, ""), data.search);
         const link = try ui.inPageTabLink(session, route, page_selected and selected_index == 0);
         var label_buf: [64]u8 = undefined;
         const label = try thread.countLabel(&label_buf, recent_tab_label, data.recent);
@@ -243,7 +246,7 @@ pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *con
 
     // labels tab
     {
-        const labels_route = try thread.searchRoute(ui.RoutablePage.repoThreadLabelsRoute(.discuss, data.identity, data.label), data.search);
+        const labels_route = try thread.searchRoute(ui.RoutablePage.repoThreadLabelsRoute(.discuss, data.identity), data.search);
         const labels_link = try ui.inPageTabLink(session, labels_route, page_selected and selected_index == View.viewIndex(.labels));
         try header.addTab(allocator, labels_tab_label, labels_link, View.viewIndex(.labels));
     }

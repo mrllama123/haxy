@@ -107,7 +107,7 @@ pub fn init(arena: *std.heap.ArenaAllocator, session: *ui.Session, route: ui.Rou
                     patch_data.repo_source = target_source;
                 },
                 .publish => {
-                    patch_data = Patches.init(.xit, repo_opts, arena, target_repo, io, haxy_moment, session, target_id, target_identity, target_branch, "", "", &id_hex, "", 0, "", .open, handle.viewer) catch |err| switch (err) {
+                    patch_data = Patches.init(.xit, repo_opts, arena, target_repo, io, haxy_moment, session, target_id, target_identity, target_branch, "", &id_hex, "", 0, "", .open, handle.viewer) catch |err| switch (err) {
                         error.NotFound => patch_data,
                         else => |other| return other,
                     };

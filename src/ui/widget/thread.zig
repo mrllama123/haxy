@@ -16,6 +16,7 @@ const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 const inp = @import("../input.zig");
 const srch_thrd = @import("../../search_thread.zig");
+const srch = @import("../../search.zig");
 const diff3 = @import("../../diff3.zig");
 const Comment = @import("../Repo/Comment.zig");
 const Attachment = @import("../Repo/Attachment.zig");
@@ -157,7 +158,7 @@ fn oidAuthor(
     return try ui.Author.init(admin_moment, arena, commit_object.content.commit.metadata.author orelse "");
 }
 
-pub fn statusSet(
+fn statusSet(
     comptime Data: type,
     comptime DB: type,
     statuses: DB.SortedMap(.read_only),
@@ -167,7 +168,7 @@ pub fn statusSet(
     return try DB.SortedSet(.read_only).init(cursor);
 }
 
-pub fn labelStatusSet(
+fn labelStatusSet(
     comptime Data: type,
     comptime DB: type,
     label_statuses: DB.SortedMap(.read_only),
@@ -178,6 +179,42 @@ pub fn labelStatusSet(
     const key = Data.Event.labelStatusKey(&key_buffer, label, status) catch return null;
     const cursor = (try label_statuses.getCursor(key)) orelse return null;
     return try DB.SortedSet(.read_only).init(cursor);
+}
+
+// the sets `status`'s listing intersects: each label's set for the status (each
+// within the status set, which joins only without labels), then `extra`. none
+// when one is missing, which lists nothing.
+pub fn statusSets(
+    comptime Data: type,
+    comptime hash_kind: hash.HashKind,
+    aa: std.mem.Allocator,
+    haxy_moment: evt.EventDB(hash_kind).HashMap(.read_only),
+    labels: []const []const u8,
+    // null when one of them is missing
+    extra: ?[]const evt.EventDB(hash_kind).SortedSet(.read_only),
+    status: Data.Status,
+) ![]const evt.EventDB(hash_kind).SortedSet(.read_only) {
+    const DB = evt.EventDB(hash_kind);
+    var sets: std.ArrayList(DB.SortedSet(.read_only)) = .empty;
+    if (labels.len == 0) {
+        const cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, Data.Event.status_to_id_set_key)) orelse return &.{};
+        try sets.append(aa, (try statusSet(Data, DB, try DB.SortedMap(.read_only).init(cursor), status)) orelse return &.{});
+    } else {
+        const cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, Data.Event.label_status_to_id_set_key)) orelse return &.{};
+        const label_statuses = try DB.SortedMap(.read_only).init(cursor);
+        for (labels) |label| try sets.append(aa, (try labelStatusSet(Data, DB, label_statuses, label, status)) orelse return &.{});
+    }
+    try sets.appendSlice(aa, extra orelse return &.{});
+    return sets.items;
+}
+
+// whether `order_key` is in every one of `sets`, and there is at least one
+pub fn inEverySet(comptime DB: type, sets: []const DB.SortedSet(.read_only), order_key: []const u8) !bool {
+    if (sets.len == 0) return false;
+    for (sets) |set| {
+        if (!try set.contains(order_key)) return false;
+    }
+    return true;
 }
 
 pub fn loadLabels(
@@ -231,19 +268,19 @@ pub fn loadWindow(
     admin_moment: ?evt.AdminDB.HashMap(.read_only),
     haxy_moment: evt.EventDB(hash_kind).HashMap(.read_only),
     records: evt.EventDB(hash_kind).HashMap(.read_only),
-    set_maybe: ?evt.EventDB(hash_kind).SortedSet(.read_only),
+    // the sets the listing intersects, all keyed alike; none lists nothing
+    sets: []const evt.EventDB(hash_kind).SortedSet(.read_only),
     root_key: ?[]const u8,
     conflict_set: ?evt.EventDB(hash_kind).SortedSet(.read_only),
     selected_id: []const u8,
     comments_start: usize,
-    // the search the set is narrowed to, or null to list it whole
-    query: ?[]const u8,
-    // a second set the listing is narrowed to, keyed like `set_maybe`
-    extra_set: ?evt.EventDB(hash_kind).SortedSet(.read_only),
+    // the words the listing is narrowed to, "" for none
+    words: []const u8,
     viewer: ?ui.Viewer,
 ) !Data.Window {
-    if (query != null or extra_set != null) return loadSearchWindow(Data, kind, hash_kind, arena, admin_moment, haxy_moment, records, set_maybe, root_key, conflict_set, selected_id, comments_start, query orelse "", extra_set, viewer);
-    const set = set_maybe orelse return .empty;
+    if (sets.len == 0) return .empty;
+    if (sets.len > 1 or words.len != 0) return loadSearchWindow(Data, kind, hash_kind, arena, admin_moment, haxy_moment, records, sets, root_key, conflict_set, selected_id, comments_start, words, viewer);
+    const set = sets[0];
     const aa = arena.allocator();
 
     var prev_id: ?[]const u8 = null;
@@ -286,10 +323,9 @@ pub fn loadWindow(
 // how many matches one search counts before the count is marked as capped
 const max_search_results = 1000;
 
-// `set`'s entries matching `query_text` (any when empty) and held by
-// `extra_set` when set, windowed like `loadWindow`. one pass
-// yields the window, its neighbours' roots and the match count, which stops at
-// the cap.
+// the intersection of `sets` narrowed to `words`, windowed like `loadWindow`.
+// one pass yields the window, its neighbours' roots and the match count, which
+// stops at the cap.
 fn loadSearchWindow(
     comptime Data: type,
     comptime kind: evt.EventKind,
@@ -298,16 +334,14 @@ fn loadSearchWindow(
     admin_moment: ?evt.AdminDB.HashMap(.read_only),
     haxy_moment: evt.EventDB(hash_kind).HashMap(.read_only),
     records: evt.EventDB(hash_kind).HashMap(.read_only),
-    set_maybe: ?evt.EventDB(hash_kind).SortedSet(.read_only),
+    sets: []const evt.EventDB(hash_kind).SortedSet(.read_only),
     root_key: ?[]const u8,
     conflict_set: ?evt.EventDB(hash_kind).SortedSet(.read_only),
     selected_id: []const u8,
     comments_start: usize,
-    query_text: []const u8,
-    extra_set: ?evt.EventDB(hash_kind).SortedSet(.read_only),
+    words: []const u8,
     viewer: ?ui.Viewer,
 ) !Data.Window {
-    const set = set_maybe orelse return .empty;
     const DB = evt.EventDB(hash_kind);
     const aa = arena.allocator();
     const root = root_key orelse "";
@@ -318,25 +352,33 @@ fn loadSearchWindow(
     var keys: std.ArrayList(OrderKey) = .empty;
     if (comptime kind == .discuss) {
         // discussions list by activity but are indexed by creation, so the
-        // matching ids are gathered and the listed set is walked in its order
-        // until every one has been found
-        var matches: std.AutoHashMapUnmanaged([evt.event_id_size]u8, void) = .empty;
-        var results = try srch_thrd.query(DB, hash_kind, kind, haxy_moment, aa, query_text, &.{extra_set});
-        while (try results.next()) |key| try matches.put(aa, (try resultKey(key))[@sizeOf(u64)..].*, {});
+        // word matches are gathered by id and the listed sets' intersection is
+        // walked in its order until every one has been found
+        // words too short to index narrow nothing, as on the other tabs
+        var matches: ?std.AutoHashMapUnmanaged([evt.event_id_size]u8, void) = null;
+        if (words.len != 0) {
+            var results = try srch_thrd.query(DB, hash_kind, kind, haxy_moment, aa, words);
+            if (results.terms.items.len != 0) {
+                var found: std.AutoHashMapUnmanaged([evt.event_id_size]u8, void) = .empty;
+                while (try results.next()) |key| try found.put(aa, (try resultKey(key))[@sizeOf(u64)..].*, {});
+                matches = found;
+            }
+        }
 
-        var iter = try set.iteratorFromIndex(0);
-        while (matches.count() > 0) {
-            const pair = try ((try iter.next()) orelse break).readKeyValuePair();
-            var order_key: OrderKey = undefined;
-            _ = try pair.key_cursor.readBytes(&order_key);
-            if (!matches.remove(order_key[@sizeOf(u64)..].*)) continue;
+        var listed: srch.Query(DB) = .{ .terms = .empty };
+        for (sets) |set| try listed.require(aa, set);
+        while (true) {
+            if (matches) |found| if (found.count() == 0) break;
+            const order_key = try resultKey((try listed.next()) orelse break);
+            if (matches) |*found| if (!found.remove(order_key[@sizeOf(u64)..].*)) continue;
             try keys.append(aa, order_key);
             if (windowKnown(Data, keys.items, root)) break;
         }
     } else {
-        // issues and patches list in the index's own order, so the listed set
-        // narrows the query and the results stream out already sorted
-        var results = try srch_thrd.query(DB, hash_kind, kind, haxy_moment, aa, query_text, &.{ set, extra_set });
+        // issues and patches list in the index's own order, so the listed sets
+        // narrow the query and the results stream out already sorted
+        var results: srch.Query(DB) = if (words.len == 0) .{ .terms = .empty } else try srch_thrd.query(DB, hash_kind, kind, haxy_moment, aa, words);
+        for (sets) |set| try results.require(aa, set);
         while (try results.next()) |key| {
             try keys.append(aa, try resultKey(key));
             if (windowKnown(Data, keys.items, root)) break;
@@ -432,11 +474,6 @@ fn loadAssignees(
     return assignees;
 }
 
-// the url-encoded assignee filter a thread page carries, "" for kinds without one
-fn assigneeFilter(data: anytype) []const u8 {
-    return if (@hasField(@TypeOf(data.*), "assignee")) data.assignee else "";
-}
-
 // a tab link's route, carrying the page's query when it has one
 pub fn searchRoute(route_maybe: ?ui.RoutablePage, search: ?[]const u8) !ui.RoutablePage {
     const route = route_maybe orelse return error.RouteTooLong;
@@ -449,43 +486,31 @@ pub fn countLabel(buffer: []u8, name: []const u8, win: anytype) ![]const u8 {
     return std.fmt.bufPrint(buffer, "{s} ({d}{s})", .{ name, win.count, if (win.more) "+" else "" });
 }
 
-// the common sub-header used by each thread page: the search box, the
-// assignee box on the issues page, then the tab strip
+// the common sub-header used by each thread page: the search box, then the
+// tab strip
 pub const Header = struct {
     box: wgt.Box(Widget),
     // focus id -> semantic stack index; some pages omit unavailable tabs
     tab_ids: std.AutoArrayHashMapUnmanaged(usize, usize),
-    // the tab whose view the stack shows. focus lands on the boxes too,
+    // the tab whose view the stack shows. focus lands on the search box too,
     // so the selection is remembered rather than read off the focus chain.
     selected_tab: ?usize = null,
-    // how many text boxes come before the tabs
-    box_count: usize,
 
-    // which box enter submitted from
-    pub const Submission = struct { kind: enum { search, assignee }, text: []u8 };
+    // the search box's place in the box, ahead of the tabs
+    const search_index: usize = 0;
 
-    // the assignee box's label and prefilled text
-    pub const AssigneeBox = struct { label: []const u8, text: []const u8 };
-
-    // a null `assignee` leaves out the assignee box
-    pub fn init(allocator: std.mem.Allocator, session: *ui.Session, search: ?[]const u8, assignee: ?AssigneeBox) !Header {
+    pub fn init(allocator: std.mem.Allocator, session: *ui.Session, search: ?[]const u8, search_label: []const u8) !Header {
         var box = try wgt.Box(Widget).init(allocator, .{ .border = null, .direction = .horiz });
         errdefer box.deinit(allocator);
 
         {
-            var search_box = try widget.SearchBox.init(allocator, session, " search ", "search", search);
+            var search_box = try widget.SearchBox.init(allocator, session, search_label, "search", search);
             errdefer search_box.deinit(allocator);
             box.getFocus().child_id = search_box.getFocus().id;
             try box.children.put(allocator, search_box.getFocus().id, .{ .widget = .{ .search_box = search_box }, .rect = null, .min_size = widget.SearchBox.min_size });
         }
 
-        if (assignee) |value| {
-            var assignee_box = try widget.SearchBox.init(allocator, session, value.label, "assignee", value.text);
-            errdefer assignee_box.deinit(allocator);
-            try box.children.put(allocator, assignee_box.getFocus().id, .{ .widget = .{ .search_box = assignee_box }, .rect = null, .min_size = widget.SearchBox.min_size });
-        }
-
-        return .{ .box = box, .tab_ids = .empty, .box_count = box.children.count() };
+        return .{ .box = box, .tab_ids = .empty };
     }
 
     pub fn addTab(self: *Header, allocator: std.mem.Allocator, label: []const u8, link: []const u8, view_index: usize) !void {
@@ -536,16 +561,11 @@ pub const Header = struct {
     }
 
     pub fn input(self: *Header, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
-        if (self.focusedBox()) |index| {
-            const search_box = self.searchBox(index);
-            // tab, and right-arrow past the last character, step to the next box or the tabs
+        const search_box = self.searchBox();
+        if (self.box.getFocus().child_id == search_box.getFocus().id) {
+            // tab, and right-arrow past the last character, step to the tabs
             if (key == .tab or (key == .arrow_right and search_box.atEnd())) {
-                root_focus.setFocus(if (index + 1 < self.box_count) self.searchBox(index + 1).getFocus().id else self.tab_ids.keys()[0]);
-                return;
-            }
-            // back-tab, and left-arrow before the first character, step to the previous box
-            if (index > 0 and (key == .back_tab or (key == .arrow_left and search_box.text_input.cursor == 0))) {
-                root_focus.setFocus(self.searchBox(index - 1).getFocus().id);
+                root_focus.setFocus(self.tab_ids.keys()[0]);
                 return;
             }
             return search_box.input(allocator, key, root_focus);
@@ -554,7 +574,7 @@ pub const Header = struct {
         if (key == .back_tab or (key == .arrow_left and current_tab == 0)) {
             // remembered here as well as in build, which may not run between keys
             self.selected_tab = current_tab;
-            root_focus.setFocus(self.searchBox(self.box_count - 1).getFocus().id);
+            root_focus.setFocus(search_box.getFocus().id);
             return;
         }
         if (inp.moveTab(key, current_tab, self.tab_ids.count())) |new_tab| {
@@ -562,22 +582,16 @@ pub const Header = struct {
         }
     }
 
-    // the typed text when enter should submit it: a box holds focus. the
+    // the typed query when enter should submit it: the box holds focus. the
     // caller owns the returned text.
-    pub fn submittedText(self: *Header, allocator: std.mem.Allocator) !?Submission {
-        const index = self.focusedBox() orelse return null;
-        return .{ .kind = if (index == 0) .search else .assignee, .text = try self.searchBox(index).text(allocator) };
+    pub fn submittedText(self: *Header, allocator: std.mem.Allocator) !?[]u8 {
+        const search_box = self.searchBox();
+        if (self.box.getFocus().child_id != search_box.getFocus().id) return null;
+        return try search_box.text(allocator);
     }
 
-    // the index of the box holding focus, if one does
-    fn focusedBox(self: *Header) ?usize {
-        const child_id = self.box.getFocus().child_id orelse return null;
-        const index = self.box.children.getIndex(child_id) orelse return null;
-        return if (index < self.box_count) index else null;
-    }
-
-    fn searchBox(self: *Header, index: usize) *widget.SearchBox {
-        return &self.box.children.values()[index].widget.search_box;
+    fn searchBox(self: *Header) *widget.SearchBox {
+        return &self.box.children.values()[search_index].widget.search_box;
     }
 
     pub fn clearGrid(self: *Header) void {
@@ -825,8 +839,8 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
             return null;
         }
 
-        fn listRoute(identity: []const u8, status: Status, label: []const u8, selected: []const u8) ?ui.RoutablePage {
-            return Data.listRoute(identity, status, label, selected);
+        fn listRoute(identity: []const u8, status: Status, selected: []const u8) ?ui.RoutablePage {
+            return Data.listRoute(identity, status, selected);
         }
 
         fn draftsRoute(identity: []const u8) ?ui.RoutablePage {
@@ -845,18 +859,11 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
             return if (supports_conflicts) Data.resolveRoute(identity, selected, picks) else null;
         }
 
-        // a list link keeps the filters the page carries: the label, and the
-        // search query and url-encoded assignee when set
-        fn listLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, status: Status, label: []const u8, id: []const u8, search: []const u8, assignee: []const u8) ![]const u8 {
-            var route = listRoute(identity, status, label, id) orelse return error.RouteTooLong;
+        // a list link keeps the search the page carries
+        fn listLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, status: Status, id: []const u8, search: []const u8) ![]const u8 {
+            var route = listRoute(identity, status, id) orelse return error.RouteTooLong;
             if (search.len != 0) route = route.withSearch(search) orelse return error.RouteTooLong;
-            if (assignee.len != 0) route = route.withEncodedAssignee(assignee) orelse return error.RouteTooLong;
             return page_arena.allocator().print("a:{s}", .{try route.toUrl(page_arena)});
-        }
-
-        fn labelLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, status: Status, label: []const u8, search: []const u8, assignee: []const u8) ![]const u8 {
-            const encoded = try ui.urlEncodeRef(page_arena.allocator(), label);
-            return listLink(page_arena, identity, status, encoded, "", search, assignee);
         }
 
         fn addToolButton(allocator: std.mem.Allocator, row: *wgt.Box(Widget), label: []const u8, bottom_label: []const u8, action: []const u8) !void {
@@ -890,7 +897,7 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
 
                 if (supports_forks and self.session.data.current_page.parent() == .fork) {
                     // the fork page's own tabs show the diff and commits
-                    const route = ui.RoutablePage.repoPatchesRoute(self.data.identity, .open, "", entry.id) orelse return error.RouteTooLong;
+                    const route = ui.RoutablePage.repoPatchesRoute(self.data.identity, .open, entry.id) orelse return error.RouteTooLong;
                     try addToolButton(allocator, row, "view on target repo", "", try pa.print("a:{s}", .{try route.toUrl(self.session.page_arena)}));
                 } else if (supports_forks) {
                     if (try Data.diffRoute(self.data.identity, entry)) |route| {
@@ -992,7 +999,7 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                 var text_box = try wgt.TextBox.init(allocator, back_label, .{ .border = .single, .round_corners = true, .wrap_kind = .none });
                 errdefer text_box.deinit(allocator);
                 text_box.getFocus().mode = .all;
-                text_box.getFocus().kind = .{ .custom = try listLink(self.session.page_arena, self.data.identity, entryStatus(entry), "", entry.id, self.data.search orelse "", "") };
+                text_box.getFocus().kind = .{ .custom = try listLink(self.session.page_arena, self.data.identity, entryStatus(entry), entry.id, self.data.search orelse "") };
                 try inner_box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
                 self.title_id = text_box.getFocus().id;
             } else {
@@ -1023,7 +1030,8 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                 var label_iter = Event.labelIterator(entry.record.event.labels);
                 while (label_iter.next()) |label| {
                     if (label.len == 0) continue;
-                    try items.append(allocator, .{ .text = label, .link = try labelLink(self.session.page_arena, self.data.identity, entryStatus(entry), label, self.data.search orelse "", assigneeFilter(self.data)) });
+                    const search = try srch_thrd.withFilter(self.session.page_arena.allocator(), self.data.search orelse "", srch_thrd.label_prefix, label);
+                    try items.append(allocator, .{ .text = label, .link = try listLink(self.session.page_arena, self.data.identity, entryStatus(entry), "", search) });
                 }
                 if (items.items.len > 0) {
                     var labels = try WordFlow.init(allocator);
@@ -1040,7 +1048,10 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                 if (entry.can_modify) try appendAssigneeRow(allocator, inner_box, self.session, thread_url);
                 // every viewer gets each assignee as a link to the issues assigned to it
                 const links = try pa.alloc([]const u8, entry.assignees.len);
-                for (links, entry.assignees) |*link, assignee| link.* = try listLink(self.session.page_arena, self.data.identity, entryStatus(entry), self.data.label, "", self.data.search orelse "", try ui.urlEncodeRef(pa, assignee.display()));
+                for (links, entry.assignees) |*link, assignee| {
+                    const search = try srch_thrd.withFilter(pa, self.data.search orelse "", srch_thrd.assignee_prefix, assignee.display());
+                    link.* = try listLink(self.session.page_arena, self.data.identity, entryStatus(entry), "", search);
+                }
                 try appendAssignedRows(allocator, inner_box, self.session, thread_url, entry.assignees, links, entry.can_modify);
             }
 
@@ -1728,7 +1739,7 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                 },
             }
 
-            const route = listRoute(self.data.identity, status, "", entry.id) orelse return;
+            const route = listRoute(self.data.identity, status, entry.id) orelse return;
             try self.session.navigate(route);
         }
     };
@@ -1826,8 +1837,8 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             return if (supports_drafts) entry.draft else false;
         }
 
-        fn listRoute(identity: []const u8, status: Status, label: []const u8, selected: []const u8) ?ui.RoutablePage {
-            return Data.listRoute(identity, status, label, selected);
+        fn listRoute(identity: []const u8, status: Status, selected: []const u8) ?ui.RoutablePage {
+            return Data.listRoute(identity, status, selected);
         }
 
         fn draftsRoute(identity: []const u8) ?ui.RoutablePage {
@@ -1850,12 +1861,10 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             return if (supports_conflicts) Data.resolveRoute(identity, selected, picks) else null;
         }
 
-        // a list link keeps the filters the page carries: the label, and the
-        // search query and url-encoded assignee when set
-        fn listLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, status: Status, label: []const u8, id: []const u8, search: []const u8, assignee: []const u8) ![]const u8 {
-            var route = listRoute(identity, status, label, id) orelse return error.RouteTooLong;
+        // a list link keeps the search the page carries
+        fn listLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, status: Status, id: []const u8, search: []const u8) ![]const u8 {
+            var route = listRoute(identity, status, id) orelse return error.RouteTooLong;
             if (search.len != 0) route = route.withSearch(search) orelse return error.RouteTooLong;
-            if (assignee.len != 0) route = route.withEncodedAssignee(assignee) orelse return error.RouteTooLong;
             return page_arena.allocator().print("a:{s}", .{try route.toUrl(page_arena)});
         }
 
@@ -1882,12 +1891,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 const route = draftsRoute(data.identity) orelse return error.RouteTooLong;
                 return page_arena.allocator().print("a:{s}", .{try route.toUrl(page_arena)});
             }
-            return listLink(page_arena, data.identity, status_maybe orelse @fromBackingInt(@intCast(0)), data.label, id, data.search orelse "", assigneeFilter(data));
-        }
-
-        fn labelLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, status: Status, label: []const u8, search: []const u8, assignee: []const u8) ![]const u8 {
-            const encoded = try ui.urlEncodeRef(page_arena.allocator(), label);
-            return listLink(page_arena, identity, status, encoded, "", search, assignee);
+            return listLink(page_arena, data.identity, status_maybe orelse @fromBackingInt(@intCast(0)), id, data.search orelse "");
         }
 
         pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !This {
@@ -1926,11 +1930,10 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 errdefer tf.deinit(allocator);
                 var items: std.ArrayList(WordFlow.Item) = .empty;
                 defer items.deinit(allocator);
-                // when filtered, the first item clears the filter
-                if (data.label.len != 0)
-                    try items.append(allocator, .{ .text = "✕", .link = try listLink(session.page_arena, data.identity, @fromBackingInt(@intCast(0)), "", "", data.search orelse "", assigneeFilter(data)) });
-                for (data.labels) |label|
-                    try items.append(allocator, .{ .text = label, .link = try labelLink(session.page_arena, data.identity, @fromBackingInt(@intCast(0)), label, data.search orelse "", assigneeFilter(data)) });
+                for (data.labels) |label| {
+                    const search = try srch_thrd.withFilter(session.page_arena.allocator(), data.search orelse "", srch_thrd.label_prefix, label);
+                    try items.append(allocator, .{ .text = label, .link = try listLink(session.page_arena, data.identity, @fromBackingInt(@intCast(0)), "", search) });
+                }
                 try tf.setItems(allocator, items.items);
                 try stack.children.put(allocator, tf.getFocus().id, .{ .word_flow = tf });
             }
@@ -2498,9 +2501,9 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             return &self.viewStack().children.values()[labels_view_index].word_flow;
         }
 
-        // no labels and no filter to clear, which shows the empty message
+        // no labels, which shows the empty message
         fn labelsEmpty(data: *const Self) bool {
-            return data.label.len == 0 and data.labels.len == 0;
+            return data.labels.len == 0;
         }
 
         // the non-confirmation form inside the stack
@@ -2735,12 +2738,9 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                         false;
                     if (enterable) root_focus.setFocus(self.box.children.keys()[stack_index]);
                 } else if (key == .enter) {
-                    if (try self.header().submittedText(allocator)) |submission| {
-                        defer allocator.free(submission.text);
-                        switch (submission.kind) {
-                            .search => try self.submitSearch(submission.text),
-                            .assignee => try self.submitAssignee(submission.text),
-                        }
+                    if (try self.header().submittedText(allocator)) |text| {
+                        defer allocator.free(text);
+                        try self.submitSearch(text);
                     }
                 } else {
                     try self.header().input(allocator, key, root_focus);
@@ -2783,30 +2783,15 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             }
         }
 
-        // navigate to the typed query's results, keeping the label filter and the
-        // status list the page shows. an empty box clears a filtered page and
-        // does nothing on any other one.
+        // navigate to the typed query's results, keeping the status list the
+        // page shows. an empty box clears a filtered page and does nothing on
+        // any other one.
         fn submitSearch(self: *This, text: []const u8) !void {
             if (text.len == 0 and self.data.search == null) return;
             const selected = self.header().getSelectedIndex() orelse 0;
             const status: Status = if (selected < status_count) splitStatus(selected) else @fromBackingInt(@intCast(0));
-            var route = listRoute(self.data.identity, status, self.data.label, "") orelse return;
-            const assignee = assigneeFilter(self.data);
-            if (assignee.len != 0) route = route.withEncodedAssignee(assignee) orelse return;
+            const route = listRoute(self.data.identity, status, "") orelse return;
             try self.session.navigate(route.withSearch(text) orelse return);
-        }
-
-        // navigate to the issues assigned to the typed name or email, keeping
-        // the label, the search and the status list. an empty box clears the
-        // filter and does nothing on an unfiltered page.
-        fn submitAssignee(self: *This, typed: []const u8) !void {
-            const text = std.mem.trim(u8, typed, " \t");
-            if (text.len == 0 and assigneeFilter(self.data).len == 0) return;
-            const selected = self.header().getSelectedIndex() orelse 0;
-            const status: Status = if (selected < status_count) splitStatus(selected) else @fromBackingInt(@intCast(0));
-            var route = listRoute(self.data.identity, status, self.data.label, "") orelse return;
-            if (self.data.search) |search| route = route.withSearch(search) orelse return;
-            try self.session.navigate(route.withEncodedAssignee(try ui.urlEncodeRef(self.session.page_arena.allocator(), text)) orelse return);
         }
 
         // arrow keys move the label selection; up from the top row crosses to the
@@ -3038,7 +3023,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 },
             }
 
-            const route = listRoute(self.data.identity, entryStatus(entry.*), "", entry.id) orelse return;
+            const route = listRoute(self.data.identity, entryStatus(entry.*), entry.id) orelse return;
             try self.session.navigate(route);
         }
 
@@ -3178,7 +3163,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             labels_input.clear(allocator);
             description_input.clear(allocator);
 
-            const route = listRoute(self.data.identity, @fromBackingInt(@intCast(0)), "", &event_id_hex) orelse return;
+            const route = listRoute(self.data.identity, @fromBackingInt(@intCast(0)), &event_id_hex) orelse return;
             try self.session.navigate(route);
         }
 
@@ -3219,7 +3204,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                         try self.rememberThreadFeedback(failure, title, labels, description, target_branch);
                         return;
                     };
-                    const route = listRoute(self.data.identity, entryStatus(entry.*), "", entry.id) orelse return;
+                    const route = listRoute(self.data.identity, entryStatus(entry.*), entry.id) orelse return;
                     try self.session.navigate(route);
                     return;
                 }
@@ -3256,7 +3241,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 },
             }
 
-            const route = listRoute(self.data.identity, entryStatus(entry.*), "", entry.id) orelse return;
+            const route = listRoute(self.data.identity, entryStatus(entry.*), entry.id) orelse return;
             try self.session.navigate(route);
         }
 
@@ -3291,7 +3276,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     if (!entryDraft(entry.*)) return;
                     const author = ((try self.session.authorize(self.data.identity, .read, kind)) orelse return).author;
                     try self.data.publishDraft(self.session, allocator, author, entry.id);
-                    const route = listRoute(self.data.identity, @fromBackingInt(@intCast(0)), "", entry.id) orelse return;
+                    const route = listRoute(self.data.identity, @fromBackingInt(@intCast(0)), entry.id) orelse return;
                     try self.session.navigate(route);
                 } else unreachable,
                 .merge => if (comptime supports_merge) {
@@ -3302,14 +3287,14 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     const author = ((try self.session.authorize(self.data.identity, .write, kind)) orelse return).author;
                     self.data.mergePatch(self.session, allocator, author, entry.id, revision) catch |err| switch (err) {
                         error.MergeConflict, error.MergeCheckUnavailable, error.PatchOutOfDate, error.PatchDataUnavailable => {
-                            const route = listRoute(self.data.identity, entryStatus(entry.*), "", entry.id) orelse return;
+                            const route = listRoute(self.data.identity, entryStatus(entry.*), entry.id) orelse return;
                             try self.session.navigate(route);
                             return;
                         },
                         else => return err,
                     };
                     const merged = std.meta.stringToEnum(Status, "merged") orelse return;
-                    const route = listRoute(self.data.identity, merged, "", entry.id) orelse return;
+                    const route = listRoute(self.data.identity, merged, entry.id) orelse return;
                     try self.session.navigate(route);
                 } else unreachable,
                 .remove => try self.submitRemove(allocator),

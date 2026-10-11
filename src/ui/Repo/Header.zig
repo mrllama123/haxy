@@ -31,24 +31,24 @@ title: ui.Title,
 // the ref/oid this page is viewing; the value is url-encoded
 ref_or_oid: RefOrOid,
 ref_or_oid_value: []const u8,
-// each thread tab's label filter, url-encoded ("" = unfiltered), so the tab
-// links back to the filtered list and shows the label beneath it.
-discussions_label: []const u8,
-issues_label: []const u8,
-patches_label: []const u8,
+// each thread tab's decoded search (null = none), so the tab links back to the
+// searched list
+discussions_search: ?[]const u8,
+issues_search: ?[]const u8,
+patches_search: ?[]const u8,
 
 const Self = @This();
 
-pub fn init(arena: *std.heap.ArenaAllocator, name: []const u8, owner_name: []const u8, ref_or_oid: RefOrOid, ref_or_oid_value: []const u8, discussions_label: []const u8, issues_label: []const u8, patches_label: []const u8) !Self {
+pub fn init(arena: *std.heap.ArenaAllocator, name: []const u8, owner_name: []const u8, ref_or_oid: RefOrOid, ref_or_oid_value: []const u8, discussions_search: ?[]const u8, issues_search: ?[]const u8, patches_search: ?[]const u8) !Self {
     return .{
         .name = name,
         .owner_name = owner_name,
         .title = try ui.Title.init(arena, name, .scanlines),
         .ref_or_oid = ref_or_oid,
         .ref_or_oid_value = ref_or_oid_value,
-        .discussions_label = discussions_label,
-        .issues_label = issues_label,
-        .patches_label = patches_label,
+        .discussions_search = discussions_search,
+        .issues_search = issues_search,
+        .patches_search = patches_search,
     };
 }
 
@@ -79,9 +79,6 @@ pub const View = struct {
         const aa = session.page_arena.allocator();
         const ref_name = std.Uri.percentDecodeInPlace(try aa.dupe(u8, page.files.patchrev_id orelse data.ref_or_oid_value));
         const bottom_label = try ui.clippedBottomLabel(try aa.alloc(u8, ui.clipped_bottom_label_max_len), ref_name);
-        const discussions_bottom_label = try ui.clippedBottomLabel(try aa.alloc(u8, ui.clipped_bottom_label_max_len), std.Uri.percentDecodeInPlace(try aa.dupe(u8, data.discussions_label)));
-        const issues_bottom_label = try ui.clippedBottomLabel(try aa.alloc(u8, ui.clipped_bottom_label_max_len), std.Uri.percentDecodeInPlace(try aa.dupe(u8, data.issues_label)));
-        const patches_bottom_label = try ui.clippedBottomLabel(try aa.alloc(u8, ui.clipped_bottom_label_max_len), std.Uri.percentDecodeInPlace(try aa.dupe(u8, data.patches_label)));
         const changes_label = switch (page.changes) {
             .diff => diff_tab_label,
             .commits => |c| if (c.commit_count) |count| try aa.print(commits_tab_label ++ " ({d})", .{count}) else commits_tab_label,
@@ -161,11 +158,11 @@ pub const View = struct {
         const changes_link = try ui.inPageTabLink(session, changes_route, current_tag == changes_tag);
         const refs_route = ui.RoutablePage.repoRefsRoute(identity, .branch, "") orelse return error.RouteTooLong;
         const refs_link = try ui.inPageTabLink(session, refs_route, current_tag == .repo_refs);
-        const discussions_route = ui.RoutablePage.repoDiscussionsRoute(identity, data.discussions_label, "") orelse return error.RouteTooLong;
+        const discussions_route = try ui.widget.thread.searchRoute(ui.RoutablePage.repoDiscussionsRoute(identity, ""), data.discussions_search);
         const discussions_link = try ui.inPageTabLink(session, discussions_route, current_tag == .repo_discussions);
-        const issues_route = ui.RoutablePage.repoIssuesRoute(identity, .open, data.issues_label, "") orelse return error.RouteTooLong;
+        const issues_route = try ui.widget.thread.searchRoute(ui.RoutablePage.repoIssuesRoute(identity, .open, ""), data.issues_search);
         const issues_link = try ui.inPageTabLink(session, issues_route, current_tag == .repo_issues);
-        const patches_route = ui.RoutablePage.repoPatchesRoute(identity, .open, data.patches_label, "") orelse return error.RouteTooLong;
+        const patches_route = try ui.widget.thread.searchRoute(ui.RoutablePage.repoPatchesRoute(identity, .open, ""), data.patches_search);
         const patches_link = try ui.inPageTabLink(session, patches_route, current_tag == .repo_patches);
         const events_route = ui.RoutablePage.repoEventsRoute(identity, .active, null, "", null) orelse return error.RouteTooLong;
         const events_link = try ui.inPageTabLink(session, events_route, current_tag == .repo_events);
@@ -227,7 +224,7 @@ pub const View = struct {
 
         // discuss tab, unless it is off
         if (page.repo.event.discuss_role != null) {
-            var text_box = try wgt.TextBox.init(allocator, discuss_tab_label, .{ .border = .single, .round_corners = true, .wrap_kind = .none, .bottom_label = .{ .text = discussions_bottom_label } });
+            var text_box = try wgt.TextBox.init(allocator, discuss_tab_label, .{ .border = .single, .round_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().mode = .all;
             text_box.getFocus().kind = .{ .custom = discussions_link };
@@ -242,7 +239,7 @@ pub const View = struct {
 
         // issues tab, unless it is off
         if (page.repo.event.issue_role != null) {
-            var text_box = try wgt.TextBox.init(allocator, issues_tab_label, .{ .border = .single, .round_corners = true, .wrap_kind = .none, .bottom_label = .{ .text = issues_bottom_label } });
+            var text_box = try wgt.TextBox.init(allocator, issues_tab_label, .{ .border = .single, .round_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().mode = .all;
             text_box.getFocus().kind = .{ .custom = issues_link };
@@ -257,7 +254,7 @@ pub const View = struct {
 
         // patches tab, unless it is off
         if (page.repo.event.patch_role != null) {
-            var text_box = try wgt.TextBox.init(allocator, patches_tab_label, .{ .border = .single, .round_corners = true, .wrap_kind = .none, .bottom_label = .{ .text = patches_bottom_label } });
+            var text_box = try wgt.TextBox.init(allocator, patches_tab_label, .{ .border = .single, .round_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().mode = .all;
             text_box.getFocus().kind = .{ .custom = patches_link };

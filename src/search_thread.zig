@@ -41,8 +41,7 @@ pub fn update(
     try srch.replace(DB, index, allocator, key, old_text, new_text);
 }
 
-// the doc keys matching `query_text`, in key order, narrowed to each non-null
-// set in `filters`, which must be keyed the same way
+// the doc keys matching `query_text`, in key order
 pub fn query(
     comptime DB: type,
     comptime hash_kind: hash.HashKind,
@@ -50,17 +49,53 @@ pub fn query(
     haxy_moment: DB.HashMap(.read_only),
     aa: std.mem.Allocator,
     query_text: []const u8,
-    filters: []const ?DB.SortedSet(.read_only),
 ) !srch.Query(DB) {
-    // no index means no words match, which one empty term expresses
-    var results: srch.Query(DB) = .{ .terms = .empty };
-    if (try haxy_moment.getCursor(hash.hashInt(hash_kind, indexKey(kind)))) |cursor| {
-        results = try srch.Query(DB).init(try DB.SortedMap(.read_only).init(cursor), aa, query_text);
-    } else {
+    const cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, indexKey(kind))) orelse {
+        // no index means no words match, which one empty term expresses
+        var results: srch.Query(DB) = .{ .terms = .empty };
         try results.terms.append(aa, .{ .postings = &.{} });
+        return results;
+    };
+    return srch.Query(DB).init(try DB.SortedMap(.read_only).init(cursor), aa, query_text);
+}
+
+pub const label_prefix = "label:";
+pub const assignee_prefix = "assignee:";
+
+// a thread search split into its filter terms and the words left for the index
+pub const Filters = struct {
+    labels: []const []const u8,
+    assignees: []const []const u8,
+    // the remaining terms joined by single spaces, "" when none
+    words: []const u8,
+};
+
+// split `search` on whitespace into label and assignee terms and plain words.
+// a prefix with no value is dropped.
+pub fn parseFilters(aa: std.mem.Allocator, search: []const u8) !Filters {
+    var labels: std.ArrayList([]const u8) = .empty;
+    var assignees: std.ArrayList([]const u8) = .empty;
+    var words: std.ArrayList([]const u8) = .empty;
+    var iter = std.mem.tokenizeAny(u8, search, &std.ascii.whitespace);
+    while (iter.next()) |term| {
+        if (std.mem.startsWith(u8, term, label_prefix)) {
+            if (term.len > label_prefix.len) try labels.append(aa, term[label_prefix.len..]);
+        } else if (std.mem.startsWith(u8, term, assignee_prefix)) {
+            if (term.len > assignee_prefix.len) try assignees.append(aa, term[assignee_prefix.len..]);
+        } else try words.append(aa, term);
     }
-    for (filters) |filter| if (filter) |set| try results.require(aa, set);
-    return results;
+    return .{ .labels = labels.items, .assignees = assignees.items, .words = try std.mem.join(aa, " ", words.items) };
+}
+
+// `search` with its `prefix` terms replaced by one for `value`, put first
+pub fn withFilter(aa: std.mem.Allocator, search: []const u8, prefix: []const u8, value: []const u8) ![]const u8 {
+    var terms: std.ArrayList([]const u8) = .empty;
+    try terms.append(aa, try std.mem.concat(aa, u8, &.{ prefix, value }));
+    var iter = std.mem.tokenizeAny(u8, search, &std.ascii.whitespace);
+    while (iter.next()) |term| {
+        if (!std.mem.startsWith(u8, term, prefix)) try terms.append(aa, term);
+    }
+    return std.mem.join(aa, " ", terms.items);
 }
 
 // the text a thread is indexed under, none once it is removed: the title and
