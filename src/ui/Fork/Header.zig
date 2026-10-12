@@ -62,7 +62,6 @@ pub const View = struct {
 
         const aa = session.page_arena.allocator();
         const fork_identity = try aa.print("{s}:{s}", .{ data.forker_name, data.name });
-        const commits_label = if (commit_count) |count| try aa.print(commits_tab_label ++ " ({d})", .{count}) else commits_tab_label;
         var first_group_width = try data.title.width();
 
         try ui.widget.addBackButton(allocator, &title_box, session);
@@ -104,12 +103,13 @@ pub const View = struct {
             ui.RoutablePage.forkCommitsRoute(fork_identity, data.id, data.oid) orelse return error.RouteTooLong,
         };
         const tags = [_]std.meta.Tag(ui.RoutablePage){ .fork_patch, .fork_diff, .fork_files, .fork_commits };
-        const labels = [_][]const u8{ patch_tab_label, diff_tab_label, files_tab_label, commits_label };
-        // a single commit's diff names the commit under its tab
+        const labels = [_][]const u8{ patch_tab_label, diff_tab_label, files_tab_label, commits_tab_label };
+        // a single commit's diff names the commit under its tab, and commits
+        // shows its count there
         const bottom_labels = [_][]const u8{ "", switch (session.data.current_page) {
             .fork_diff => |*d| if (d.oid.len == 0) "" else try ui.clippedBottomLabel(try aa.alloc(u8, ui.clipped_bottom_label_max_len), d.oid.slice()),
             else => "",
-        }, "", "" };
+        }, "", if (commit_count) |count| try aa.print("({d})", .{count}) else "" };
         var selected_tab: ?usize = null;
 
         for (routes, tags, labels, bottom_labels) |route, tag, label, bottom_label| {

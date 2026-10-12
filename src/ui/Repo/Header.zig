@@ -77,13 +77,14 @@ pub const View = struct {
         errdefer tab_ids.deinit(allocator);
 
         const aa = session.page_arena.allocator();
+        // the ref or revision files and commits show, above both tabs
         const ref_name = std.Uri.percentDecodeInPlace(try aa.dupe(u8, page.files.patchrev_id orelse data.ref_or_oid_value));
-        const bottom_label = try ui.clippedBottomLabel(try aa.alloc(u8, ui.clipped_bottom_label_max_len), ref_name);
-        const changes_label = switch (page.changes) {
-            .diff => diff_tab_label,
-            .commits => |c| if (c.commit_count) |count| try aa.print(commits_tab_label ++ " ({d})", .{count}) else commits_tab_label,
+        const ref_label = try ui.clippedBottomLabel(try aa.alloc(u8, ui.clipped_bottom_label_max_len), ref_name);
+        const ref_label_width = try xitui.width.displayWidth(ref_label);
+        const changes_label, const commit_count_label: []const u8 = switch (page.changes) {
+            .diff => .{ diff_tab_label, "" },
+            .commits => |c| .{ commits_tab_label, if (c.commit_count) |count| try aa.print("({d})", .{count}) else "" },
         };
-        const changes_label_width = try xitui.width.displayWidth(changes_label);
         var first_group_width = try data.title.width();
 
         try ui.widget.addBackButton(allocator, &title_box, session);
@@ -179,7 +180,7 @@ pub const View = struct {
 
         // files tab
         {
-            var text_box = try wgt.TextBox.init(allocator, files_tab_label, .{ .border = .single, .round_corners = true, .wrap_kind = .none, .bottom_label = .{ .text = bottom_label } });
+            var text_box = try wgt.TextBox.init(allocator, files_tab_label, .{ .border = .single, .round_corners = true, .wrap_kind = .none, .top_label = .{ .text = ref_label } });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().mode = .all;
             text_box.getFocus().kind = .{ .custom = files_link };
@@ -188,13 +189,13 @@ pub const View = struct {
             try tabs_box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
-                .min_size = .{ .width = files_tab_label.len + 2, .height = null },
+                .min_size = .{ .width = @max(files_tab_label.len, ref_label_width) + 2, .height = null },
             });
         }
 
         // commits, or the comparison selected by a diff / patchrev url
         {
-            var text_box = try wgt.TextBox.init(allocator, changes_label, .{ .border = .single, .round_corners = true, .wrap_kind = .none, .bottom_label = .{ .text = bottom_label } });
+            var text_box = try wgt.TextBox.init(allocator, changes_label, .{ .border = .single, .round_corners = true, .wrap_kind = .none, .top_label = .{ .text = ref_label }, .bottom_label = .{ .text = commit_count_label } });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().mode = .all;
             text_box.getFocus().kind = .{ .custom = changes_link };
@@ -203,7 +204,7 @@ pub const View = struct {
             try tabs_box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
-                .min_size = .{ .width = changes_label_width + 2, .height = null },
+                .min_size = .{ .width = @max(changes_label.len, ref_label_width, commit_count_label.len) + 2, .height = null },
             });
         }
 

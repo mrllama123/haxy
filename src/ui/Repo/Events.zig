@@ -723,16 +723,14 @@ pub const Header = struct {
             const view_labels = [_][]const u8{ active_tab_label, removed_tab_label };
             inline for ([_]ui.RoutablePage.EventsView{ .active, .removed }, view_labels, 0..) |view, view_label, i| {
                 const route = ui.RoutablePage.repoEventsRoute(data.identity, view, null, "", data.moment) orelse return error.RouteTooLong;
-                const count = data.window(view).count;
-                var label_buf: [64]u8 = undefined;
-                const label = try std.fmt.bufPrint(&label_buf, "{s} ({d})", .{ view_label, count });
-                var tab = try wgt.TextBox.init(allocator, label, .{ .border = .hidden, .round_corners = true, .wrap_kind = .none });
+                const count_label = try session.page_arena.allocator().print("({d})", .{data.window(view).count});
+                var tab = try wgt.TextBox.init(allocator, view_label, .{ .border = .hidden, .round_corners = true, .wrap_kind = .none, .bottom_label = .{ .text = count_label } });
                 errdefer tab.deinit(allocator);
                 tab.getFocus().mode = .all;
                 const selected = std.meta.activeTag(session.data.current_page) == .repo_events and data.view == view;
                 tab.getFocus().kind = .{ .custom = try ui.inPageTabLink(session, route, selected) };
                 tab_ids[i] = tab.getFocus().id;
-                try box.children.put(allocator, tab.getFocus().id, .{ .widget = .{ .text_box = tab }, .rect = null, .min_size = .{ .width = label.len + 2, .height = null } });
+                try box.children.put(allocator, tab.getFocus().id, .{ .widget = .{ .text_box = tab }, .rect = null, .min_size = .{ .width = @max(view_label.len, count_label.len) + 2, .height = null } });
             }
 
             // pushes the sync button and status to the right

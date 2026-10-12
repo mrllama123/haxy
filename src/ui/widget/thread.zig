@@ -482,9 +482,9 @@ pub fn searchRoute(route_maybe: ?ui.RoutablePage, search: ?[]const u8) !ui.Routa
     return route.withSearch(query) orelse error.RouteTooLong;
 }
 
-// a status tab's label: its listing's count, marked when a search capped it
-pub fn countLabel(buffer: []u8, name: []const u8, win: anytype) ![]const u8 {
-    return std.fmt.bufPrint(buffer, "{s} ({d}{s})", .{ name, win.count, if (win.more) "+" else "" });
+// a status tab's bottom label: its listing's count, marked when a search capped it
+pub fn countLabel(session: *ui.Session, win: anytype) ![]const u8 {
+    return session.page_arena.allocator().print("({d}{s})", .{ win.count, if (win.more) "+" else "" });
 }
 
 // the common sub-header used by each thread page: the search box, then the
@@ -514,8 +514,8 @@ pub const Header = struct {
         return .{ .box = box, .tab_ids = .empty };
     }
 
-    pub fn addTab(self: *Header, allocator: std.mem.Allocator, label: []const u8, link: []const u8, view_index: usize) !void {
-        var text_box = try wgt.TextBox.init(allocator, label, .{ .border = .single, .round_corners = true, .wrap_kind = .none });
+    pub fn addTab(self: *Header, allocator: std.mem.Allocator, label: []const u8, bottom_label: []const u8, link: []const u8, view_index: usize) !void {
+        var text_box = try wgt.TextBox.init(allocator, label, .{ .border = .single, .round_corners = true, .wrap_kind = .none, .bottom_label = .{ .text = bottom_label } });
         errdefer text_box.deinit(allocator);
         text_box.getFocus().mode = .all;
         text_box.getFocus().kind = .{ .custom = link };
@@ -523,7 +523,7 @@ pub const Header = struct {
         try self.box.children.put(allocator, text_box.getFocus().id, .{
             .widget = .{ .text_box = text_box },
             .rect = null,
-            .min_size = .{ .width = label.len + 2, .height = null },
+            .min_size = .{ .width = @max(label.len, bottom_label.len) + 2, .height = null },
         });
     }
 

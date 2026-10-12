@@ -239,16 +239,14 @@ pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *con
     {
         const route = try thread.searchRoute(ui.RoutablePage.repoDiscussionsRoute(data.identity, ""), data.search);
         const link = try ui.inPageTabLink(session, route, page_selected and selected_index == 0);
-        var label_buf: [64]u8 = undefined;
-        const label = try thread.countLabel(&label_buf, recent_tab_label, data.recent);
-        try header.addTab(allocator, label, link, 0);
+        try header.addTab(allocator, recent_tab_label, try thread.countLabel(session, data.recent), link, 0);
     }
 
     // labels tab
     {
         const labels_route = try thread.searchRoute(ui.RoutablePage.repoThreadLabelsRoute(.discuss, data.identity), data.search);
         const labels_link = try ui.inPageTabLink(session, labels_route, page_selected and selected_index == View.viewIndex(.labels));
-        try header.addTab(allocator, labels_tab_label, labels_link, View.viewIndex(.labels));
+        try header.addTab(allocator, labels_tab_label, "", labels_link, View.viewIndex(.labels));
     }
 
     // new-discussion tab; an edit or comment url shows its tab in this place
@@ -268,7 +266,7 @@ pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *con
             .remove => remove_tab_label,
             else => new_tab_label,
         };
-        try header.addTab(allocator, label, link, View.viewIndex(.new));
+        try header.addTab(allocator, label, "", link, View.viewIndex(.new));
     }
 
     header.select(View.viewIndex(data.view));

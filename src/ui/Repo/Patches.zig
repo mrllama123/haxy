@@ -1005,16 +1005,14 @@ pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *con
     for ([_]Status{ .open, .closed, .merged }, status_labels, 0..) |status, status_label, index| {
         const route = try thread.searchRoute(ui.RoutablePage.repoPatchesRoute(data.identity, status, ""), data.search);
         const link = try ui.inPageTabLink(session, route, page_selected and selected_index == index);
-        var label_buf: [64]u8 = undefined;
-        const label = try thread.countLabel(&label_buf, status_label, data.window(status).*);
-        try header.addTab(allocator, label, link, index);
+        try header.addTab(allocator, status_label, try thread.countLabel(session, data.window(status).*), link, index);
     }
 
     // labels tab
     {
         const labels_route = try thread.searchRoute(ui.RoutablePage.repoThreadLabelsRoute(.patch, data.identity), data.search);
         const labels_link = try ui.inPageTabLink(session, labels_route, page_selected and selected_index == View.viewIndex(.labels));
-        try header.addTab(allocator, labels_tab_label, labels_link, View.viewIndex(.labels));
+        try header.addTab(allocator, labels_tab_label, "", labels_link, View.viewIndex(.labels));
     }
 
     // new-patch tab; an edit or resolve url shows its tab in this place
@@ -1040,25 +1038,21 @@ pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *con
             .resolve => resolve_tab_label,
             else => new_tab_label,
         };
-        try header.addTab(allocator, label, link, View.viewIndex(.new));
+        try header.addTab(allocator, label, "", link, View.viewIndex(.new));
     }
 
     // drafts belong to the logged-in user and are not available locally
     if (session.data.host_kind != .local) {
         const route = ui.RoutablePage.repoPatchesDraftsRoute(data.identity) orelse return error.RouteTooLong;
         const link = try ui.inPageTabLink(session, route, page_selected and selected_index == View.viewIndex(.drafts));
-        var label_buf: [64]u8 = undefined;
-        const label = try std.fmt.bufPrint(&label_buf, drafts_tab_label ++ " ({d})", .{data.drafts.count});
-        try header.addTab(allocator, label, link, View.viewIndex(.drafts));
+        try header.addTab(allocator, drafts_tab_label, try session.page_arena.allocator().print("({d})", .{data.drafts.count}), link, View.viewIndex(.drafts));
     }
 
     // conflicts tab, labeled with the conflict count
     if (data.conflicts.count > 0) {
         const route = ui.RoutablePage.repoPatchesConflictsRoute(data.identity, "") orelse return error.RouteTooLong;
         const link = try ui.inPageTabLink(session, route, page_selected and selected_index == View.viewIndex(.conflicts));
-        var label_buf: [64]u8 = undefined;
-        const label = try std.fmt.bufPrint(&label_buf, conflicts_tab_label ++ " ({d})", .{data.conflicts.count});
-        try header.addTab(allocator, label, link, View.viewIndex(.conflicts));
+        try header.addTab(allocator, conflicts_tab_label, try session.page_arena.allocator().print("({d})", .{data.conflicts.count}), link, View.viewIndex(.conflicts));
     }
 
     header.select(View.viewIndex(data.view));

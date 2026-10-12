@@ -1530,6 +1530,8 @@ fn seedPush(io: std.Io, allocator: std.mem.Allocator, repo: *rp.Repo(.xit, .{}),
                 },
             };
 
+            // receive-pack patches the new tips before the branches refresh
+            try xit.patch.writePatches(opts, state, ctx.io, ctx.allocator, &.{ feature_new, docs_new }, null);
             _ = try pch.refreshBranchesInTransaction(.{ .server = .{ .users_dir = ctx.users_dir } }, opts, state, &moment, ctx.io, ctx.allocator, &updates, null, null);
             try push.writeUndo(opts, state, ctx.io, ctx.allocator, ctx.author, &updates);
         }
