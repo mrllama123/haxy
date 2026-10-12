@@ -853,7 +853,7 @@ fn patchLifecycle(merge_revision: evt.Patch.MergeRevision) !void {
             .timestamp = 1,
             .author = author,
             .event = .{ .repo = .{
-                .user_id = &user_id,
+                .user_id = std.fmt.bytesToHex(user_id, .lower),
                 .name = "repo",
                 .description = "",
                 .patch_role = .read,

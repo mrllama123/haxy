@@ -274,8 +274,8 @@ fn writeMode(
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
         .author = author,
         .event = .{ .notify = .{
-            .owner_id = &location.owner_id,
-            .repo_id = &location.repo_id,
+            .owner_id = std.fmt.bytesToHex(location.owner_id, .lower),
+            .repo_id = std.fmt.bytesToHex(location.repo_id, .lower),
             .thread_id = std.fmt.bytesToHex(thread_id.*, .lower),
             .mode = mode,
         } },

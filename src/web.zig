@@ -1750,7 +1750,7 @@ fn handleRemove(
             // a draft lives in its author's user repo
             if (try evt.readForkById(io, allocator, &author_arena, server.users_dir, &user_id, &parts.id)) |fork_record| {
                 const repo_id = evt.parseEventId(std.Io.Dir.path.basename(source.path)) catch return respondRemoveNotFound(request);
-                if (!fork_record.removed and fork_record.event.stage == .draft and std.mem.eql(u8, fork_record.event.repo_id, &repo_id)) {
+                if (!fork_record.removed and fork_record.event.stage == .draft and std.mem.eql(u8, &fork_record.event.repo_id, &std.fmt.bytesToHex(repo_id, .lower))) {
                     const id = std.fmt.bytesToHex(parts.id, .lower);
                     try fork.remove(io, allocator, server.users_dir, &user_id, &id, author);
 

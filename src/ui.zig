@@ -2191,7 +2191,7 @@ pub fn authorizeUser(
         .author = .{ .name = user.event.name, .email = user.event.email },
         .user_id = user_id,
         .role = role,
-        .repo_user_id = repo.repo.event.user_id[0..evt.event_id_size].*,
+        .repo_user_id = try evt.parseEventId(&repo.repo.event.user_id),
     } };
 }
 

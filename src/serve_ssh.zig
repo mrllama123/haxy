@@ -489,7 +489,9 @@ fn runForkSession(
     if (service == .receive_pack and !isKeyInAuthorizedKeys(user.event.ssh_keys, &sess.fingerprint))
         return writeError(sess, "unauthorized: this SSH key is not registered to the patch author");
 
-    const target = (try evt.readRepoById(io, allocator, &admin_arena, handler.server.users_dir, fork_record.event.repo_user_id[0..evt.event_id_size], fork_record.event.repo_id[0..evt.event_id_size], forker_id)) orelse
+    const target_owner_id = try evt.parseEventId(&fork_record.event.repo_user_id);
+    const target_id = try evt.parseEventId(&fork_record.event.repo_id);
+    const target = (try evt.readRepoById(io, allocator, &admin_arena, handler.server.users_dir, &target_owner_id, &target_id, forker_id)) orelse
         return writeError(sess, "repo not found");
     // patches that are off take their drafts with them
     const patch_role = target.repo.event.patch_role orelse return writeError(sess, "patch draft not found");
@@ -510,7 +512,7 @@ fn runForkSession(
         }
     } else {
         if (!std.mem.eql(u8, target.repo.event.name, forker_repo.name)) return writeError(sess, "patch draft belongs to another repo");
-        const target_path = try evt.repoPath(allocator, handler.server.users_dir, fork_record.event.repo_user_id, fork_record.event.repo_id);
+        const target_path = try evt.repoPath(allocator, handler.server.users_dir, &target_owner_id, &target_id);
         defer allocator.free(target_path);
         const author: evt.CommitAuthor = .{ .name = user.event.name, .email = user.event.email };
         const timestamp: u64 = @intCast(std.Io.Timestamp.now(io, .real).toSeconds());
@@ -590,14 +592,14 @@ fn authorizeRepoKey(
     }
 
     // the creator owns the repo
-    const owner_id = repo.repo.event.user_id[0..evt.event_id_size];
-    if (try authorWithKey(moment, arena, owner_id, fingerprint)) |author| return .{ .allowed = author };
+    const owner_id = try evt.parseEventId(&repo.repo.event.user_id);
+    if (try authorWithKey(moment, arena, &owner_id, fingerprint)) |author| return .{ .allowed = author };
 
     // anyone else holding the key needs a grant with the role. a key can be
     // shared, so a grant that falls short doesn't end the search.
-    for (try evt.readRepoGrants(io, allocator, arena, users_dir, owner_id, &repo.event_id)) |grant| {
+    for (try evt.readRepoGrants(io, allocator, arena, users_dir, &owner_id, &repo.event_id)) |grant| {
         if (!grant.role.atLeast(min_role)) continue;
-        if (try authorWithKey(moment, arena, grant.user_id, fingerprint)) |author| return .{ .allowed = author };
+        if (try authorWithKey(moment, arena, &try evt.parseEventId(&grant.user_id), fingerprint)) |author| return .{ .allowed = author };
     }
     return .denied;
 }

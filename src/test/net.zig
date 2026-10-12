@@ -545,7 +545,7 @@ fn testPushFork(
         const moment = try evt.currentMoment(evt.admin_repo_opts, &admin);
         const target = (try evt.readRepoByOwnerAndName(io, allocator, &arena, moment, users_dir, "admin", "target", null)) orelse return error.NotFound;
         repo_id = target.event_id;
-        @memcpy(&user_id, target.repo.event.user_id);
+        user_id = try evt.parseEventId(&target.repo.event.user_id);
         // patches are off on a new repo
         try evt.updateRepo(io, allocator, users_dir, &user_id, .{ .name = "admin", .email = "admin@example.test" }, "target", "target", target.repo.event.description, target.repo.event.read_access, .read, .read, .read);
         var user_repo = (try evt.openUserRepo(io, allocator, users_dir, &user_id)) orelse return error.NotFound;
@@ -825,7 +825,7 @@ fn testPushFork(
                 .timestamp = 2,
                 .author = .{ .name = "admin", .email = "admin@example.test" },
                 .event = .{ .repo = .{
-                    .user_id = &user_id,
+                    .user_id = std.fmt.bytesToHex(user_id, .lower),
                     .name = "target",
                     .description = "",
                     .patch_role = .read,

@@ -900,7 +900,7 @@ pub fn publish(
     const admin_moment = try evt.currentMoment(evt.admin_repo_opts, admin_repo);
     const user_moment = (try evt.userMoment(&user_repo)) orelse return error.InvalidPatchDraft;
     const fork_record = (try evt.Fork.readById(evt.UserDB, evt.user_repo_opts.hash, user_moment, &arena, &patch_id)) orelse return error.InvalidPatchDraft;
-    if (fork_record.removed or !std.mem.eql(u8, fork_record.event.repo_id, &input.repo_id)) return error.InvalidPatchDraft;
+    if (fork_record.removed or !std.mem.eql(u8, &fork_record.event.repo_id, &std.fmt.bytesToHex(input.repo_id, .lower))) return error.InvalidPatchDraft;
     const user = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &arena, &input.user_id)) orelse return error.InvalidPatchDraft;
     if (user.removed or
         !std.mem.eql(u8, user.event.name, input.author.name) or
@@ -1045,7 +1045,7 @@ pub fn editDraft(
         const user_moment = (try evt.userMoment(&user_repo)) orelse return false;
         const fork_record = (try evt.Fork.readById(evt.UserDB, evt.user_repo_opts.hash, user_moment, &arena, &patch_id)) orelse return false;
         if (fork_record.event.stage != .draft) return false;
-        if (fork_record.removed or !std.mem.eql(u8, fork_record.event.repo_id, &input.repo_id)) return error.InvalidPatchDraft;
+        if (fork_record.removed or !std.mem.eql(u8, &fork_record.event.repo_id, &std.fmt.bytesToHex(input.repo_id, .lower))) return error.InvalidPatchDraft;
         const user = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &arena, &input.user_id)) orelse return error.InvalidPatchDraft;
         if (user.removed or
             !std.mem.eql(u8, user.event.name, input.author.name) or

@@ -134,8 +134,8 @@ pub fn init(
                 const record = (try evt.Fork.readById(DB, hash_kind, moment, arena, &fork_id)) orelse continue;
 
                 // the target lives in its owner's user repo
-                const owner_id = record.event.repo_user_id[0..evt.event_id_size];
-                const target = (try evt.readRepoById(io, gpa, arena, users_dir, owner_id, record.event.repo_id[0..evt.event_id_size], session.userId())) orelse continue;
+                const owner_id = try evt.parseEventId(&record.event.repo_user_id);
+                const target = (try evt.readRepoById(io, gpa, arena, users_dir, &owner_id, &try evt.parseEventId(&record.event.repo_id), session.userId())) orelse continue;
                 if (target.role == null) continue;
                 // patches that are off take their drafts with them
                 if (target.repo.event.patch_role == null) continue;

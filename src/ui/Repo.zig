@@ -229,6 +229,8 @@ pub fn init(
     // knows all three; the server paths resolve them from the admin db.
     var source: ?ui.RepoSource = null;
     var repo_id_maybe: ?[evt.event_id_size]u8 = null;
+    // local mode has no owner
+    var owner_id: [evt.event_id_size]u8 = @splat(0);
     var repo: evt.Repo.Record = undefined;
     // local mode owns its repo
     var role: evt.Repo.Role = .owner;
@@ -239,7 +241,7 @@ pub fn init(
         // repo's directory rather than the route.
         repo = .{
             .event = .{
-                .user_id = "",
+                .user_id = @splat('0'),
                 .name = try arena.allocator().dupe(u8, std.Io.Dir.path.basename(local.path)),
                 .description = "",
                 // local mode shows every tab
@@ -261,12 +263,13 @@ pub fn init(
 
         // resolve the creating user so the header can show their name to the left
         // of the repo title.
-        const owner = (try evt.User.readById(DB, hash_kind, haxy_moment, arena, repo.event.user_id)) orelse return error.NotFound;
+        owner_id = try evt.parseEventId(&repo.event.user_id);
+        const owner = (try evt.User.readById(DB, hash_kind, haxy_moment, arena, &owner_id)) orelse return error.NotFound;
         owner_name = owner.event.name;
 
         // the repo's working copy lives in its owner's dir.
         source = .{
-            .path = try evt.repoPath(arena.allocator(), users_dir, repo.event.user_id, &found.event_id),
+            .path = try evt.repoPath(arena.allocator(), users_dir, &owner_id, &found.event_id),
             .repo_kind = .xit,
         };
     }
@@ -323,7 +326,7 @@ pub fn init(
                                     .patch_role = repo.event.patch_role,
                                     .hash_kind = opened.self_repo_opts.hash,
                                     .view = if (route == .repo_roles) .roles else .settings,
-                                    .roles = try Roles.init(io, gpa, arena, session.haxy_moment orelse return error.NoMoment, session.users_dir orelse return error.NoMoment, repo_identity.identity, repo.event.user_id[0..evt.event_id_size], &repo_id, roles_start),
+                                    .roles = try Roles.init(io, gpa, arena, session.haxy_moment orelse return error.NoMoment, session.users_dir orelse return error.NoMoment, repo_identity.identity, &owner_id, &repo_id, roles_start),
                                 };
                             }
                             // tabs switch in-page, so every tab's data is read here
@@ -357,7 +360,7 @@ pub fn init(
                             if (repo_kind == .xit and session.data.host_kind == .server) {
                                 // a server page always resolved its repo id
                                 const repo_id = repo_id_maybe orelse unreachable;
-                                readNotify(opened.self_repo_opts, session, arena, opened, repo.event.user_id[0..evt.event_id_size], &repo_id, viewed_thread, &discussions_data, &issues_data, &patches_data) catch |err| {
+                                readNotify(opened.self_repo_opts, session, arena, opened, &owner_id, &repo_id, viewed_thread, &discussions_data, &issues_data, &patches_data) catch |err| {
                                     std.log.warn("failed to read thread notifications: {s}", .{@errorName(err)});
                                 };
                             }

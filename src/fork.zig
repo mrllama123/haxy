@@ -239,8 +239,8 @@ fn copyTarget(
         .timestamp = input.timestamp,
         .author = input.author,
         .event = .{ .fork = .{
-            .repo_id = &input.repo_id,
-            .repo_user_id = &input.repo_user_id,
+            .repo_id = std.fmt.bytesToHex(input.repo_id, .lower),
+            .repo_user_id = std.fmt.bytesToHex(input.repo_user_id, .lower),
         } },
     }});
 }

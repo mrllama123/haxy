@@ -4,9 +4,9 @@ const xit = @import("xit");
 const hash = xit.hash;
 
 // what the grant gives access to, held in the same user repo
-target_id: []const u8,
+target_id: [evt.event_id_size * 2]u8,
 // who it gives access to
-user_id: []const u8,
+user_id: [evt.event_id_size * 2]u8,
 role: evt.Repo.Role,
 
 // what the db stores: the event's data plus the commit-derived fields
@@ -26,7 +26,7 @@ pub const all_id_set_key = "grant-id-set";
 pub const target_to_grant_id_set_key = "target->grant-id-set";
 
 // the id of the one grant a user can hold on a target
-pub fn idOf(target_id: []const u8, user_id: []const u8) [evt.event_id_size]u8 {
+pub fn idOf(target_id: *const [evt.event_id_size]u8, user_id: *const [evt.event_id_size]u8) [evt.event_id_size]u8 {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     hasher.update(target_id);
     hasher.update(user_id);
@@ -38,9 +38,9 @@ pub fn idOf(target_id: []const u8, user_id: []const u8) [evt.event_id_size]u8 {
 // only what the event says about itself is checked. a grant naming a missing
 // target or user is inert.
 fn validate(event_id: *const [evt.event_id_size]u8, record: Record) !void {
-    if (record.event.target_id.len != evt.event_id_size) return error.InvalidTargetId;
-    if (record.event.user_id.len != evt.event_id_size) return error.InvalidUserId;
-    if (!std.mem.eql(u8, event_id, &idOf(record.event.target_id, record.event.user_id))) return error.InvalidGrantId;
+    const target_id = try evt.parseEventId(&record.event.target_id);
+    const user_id = try evt.parseEventId(&record.event.user_id);
+    if (!std.mem.eql(u8, event_id, &idOf(&target_id, &user_id))) return error.InvalidGrantId;
 }
 
 pub fn consume(
@@ -84,7 +84,8 @@ pub fn consume(
     }
 
     // the id fixes the target, so a grant never moves between sets
-    const target_grants = try DB.SortedSet(.read_write).init(try by_target.putCursor(hash.hashInt(hash_kind, record.event.target_id)));
+    const target_id = try evt.parseEventId(&record.event.target_id);
+    const target_grants = try DB.SortedSet(.read_write).init(try by_target.putCursor(hash.hashInt(hash_kind, &target_id)));
     if (record.removed) {
         _ = try target_grants.remove(&order_key);
     } else {
@@ -98,8 +99,8 @@ pub fn readRole(
     comptime hash_kind: hash.HashKind,
     haxy_moment: DB.HashMap(.read_only),
     arena: *std.heap.ArenaAllocator,
-    target_id: []const u8,
-    user_id: []const u8,
+    target_id: *const [evt.event_id_size]u8,
+    user_id: *const [evt.event_id_size]u8,
 ) !?evt.Repo.Role {
     const Granted = struct { event: struct { role: evt.Repo.Role }, removed: bool };
     const grant = (try evt.readRecordSubset(Self, Granted, DB, hash_kind, haxy_moment, arena, &idOf(target_id, user_id))) orelse return null;
@@ -112,7 +113,7 @@ pub fn readByTarget(
     comptime hash_kind: hash.HashKind,
     haxy_moment: DB.HashMap(.read_only),
     arena: *std.heap.ArenaAllocator,
-    target_id: []const u8,
+    target_id: *const [evt.event_id_size]u8,
 ) ![]const Self {
     var grants: std.ArrayList(Self) = .empty;
     const by_target_cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, target_to_grant_id_set_key)) orelse return grants.items;

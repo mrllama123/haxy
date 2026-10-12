@@ -51,8 +51,9 @@ pub fn init(
     var next_start: ?usize = null;
     for (grants) |grant| {
         // the creator owns the repo with or without a grant
-        if (grant.role == .read or std.mem.eql(u8, grant.user_id, owner_id)) continue;
-        const user = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, arena, grant.user_id)) orelse continue;
+        const user_id = try evt.parseEventId(&grant.user_id);
+        if (grant.role == .read or std.mem.eql(u8, &user_id, owner_id)) continue;
+        const user = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, arena, &user_id)) orelse continue;
         if (user.removed) continue;
         if (skipped < start) {
             skipped += 1;

@@ -68,8 +68,8 @@ pub fn userRepoPath(allocator: std.mem.Allocator, users_dir: []const u8, user_id
 }
 
 // a repo's path, inside its owner's dir
-pub fn repoPath(allocator: std.mem.Allocator, users_dir: []const u8, owner_id: []const u8, repo_id: []const u8) ![]u8 {
-    return try std.Io.Dir.path.join(allocator, &.{ users_dir, &std.fmt.bytesToHex(owner_id[0..event_id_size].*, .lower), "repos", &std.fmt.bytesToHex(repo_id[0..event_id_size].*, .lower) });
+pub fn repoPath(allocator: std.mem.Allocator, users_dir: []const u8, owner_id: *const [event_id_size]u8, repo_id: *const [event_id_size]u8) ![]u8 {
+    return try std.Io.Dir.path.join(allocator, &.{ users_dir, &std.fmt.bytesToHex(owner_id.*, .lower), "repos", &std.fmt.bytesToHex(repo_id.*, .lower) });
 }
 
 // the ids a repo path names, or null for a path `repoPath` didn't build
@@ -2145,7 +2145,7 @@ pub fn grantRole(
         .id = std.fmt.bytesToHex(Grant.idOf(repo_id, user_id), .lower),
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
         .author = author,
-        .event = .{ .grant = .{ .target_id = repo_id, .user_id = user_id, .role = role } },
+        .event = .{ .grant = .{ .target_id = std.fmt.bytesToHex(repo_id.*, .lower), .user_id = std.fmt.bytesToHex(user_id.*, .lower), .role = role } },
     }});
 }
 
@@ -2278,7 +2278,7 @@ fn writeRepoEvent(
         .timestamp = timestamp,
         .author = owner,
         .event = .{ .repo = .{
-            .user_id = owner_id,
+            .user_id = std.fmt.bytesToHex(owner_id.*, .lower),
             .name = name,
             .description = description,
             .read_access = read_access,

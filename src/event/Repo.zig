@@ -3,7 +3,7 @@ const evt = @import("../event.zig");
 const xit = @import("xit");
 const hash = xit.hash;
 
-user_id: []const u8,
+user_id: [evt.event_id_size * 2]u8,
 name: []const u8,
 description: []const u8,
 read_access: Access = .private,
@@ -77,7 +77,7 @@ pub fn roleOf(
     // what the access fields give everyone, logged in or not
     const base_maybe: ?Role = if (record.event.write_access == .public) .write else if (record.event.read_access == .public) .read else null;
     const user_id = user_id_maybe orelse return base_maybe;
-    if (std.mem.eql(u8, record.event.user_id, &user_id)) return .owner;
+    if (std.mem.eql(u8, &record.event.user_id, &std.fmt.bytesToHex(user_id, .lower))) return .owner;
 
     const granted = (try evt.Grant.readRole(DB, hash_kind, user_moment, arena, repo_id, &user_id)) orelse return base_maybe;
     const base = base_maybe orelse return granted;
@@ -127,7 +127,10 @@ pub fn consume(
 
     var record_to_write = record_maybe orelse try evt.removedRecord(Record, DB, hash_kind, haxy_moment.readOnly(), existing_record_maybe);
 
-    if (!record_to_write.removed) try validateName(record_to_write.event.name);
+    if (!record_to_write.removed) {
+        _ = try evt.parseEventId(&record_to_write.event.user_id);
+        try validateName(record_to_write.event.name);
+    }
 
     if (existing_record_maybe) |existing_record| {
         // updates preserve the original creation metadata

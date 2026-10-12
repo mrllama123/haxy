@@ -4,9 +4,9 @@ const xit = @import("xit");
 const hash = xit.hash;
 
 // the repo's owner, whose user repo holds the subscriber index
-owner_id: []const u8,
+owner_id: [evt.event_id_size * 2]u8,
 // the thread and its repo
-repo_id: []const u8,
+repo_id: [evt.event_id_size * 2]u8,
 thread_id: [evt.event_id_size * 2]u8,
 mode: Mode,
 
@@ -33,7 +33,7 @@ pub const record_map_key = "event-id->notify";
 pub const all_id_set_key = "notify-id-set";
 
 // the id of the one record a user can hold on a thread
-pub fn idOf(repo_id: []const u8, thread_id: *const [evt.event_id_size]u8) [evt.event_id_size]u8 {
+pub fn idOf(repo_id: *const [evt.event_id_size]u8, thread_id: *const [evt.event_id_size]u8) [evt.event_id_size]u8 {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     // the kind name keeps the id apart from the notif id the same pair hashes to
     hasher.update(@tagName(evt.EventKind.notify));
@@ -47,10 +47,10 @@ pub fn idOf(repo_id: []const u8, thread_id: *const [evt.event_id_size]u8) [evt.e
 // only what the event says about itself is checked. a record naming a missing
 // repo or thread is inert.
 fn validate(event_id: *const [evt.event_id_size]u8, record: Record) !void {
-    if (record.event.owner_id.len != evt.event_id_size) return error.InvalidOwnerId;
-    if (record.event.repo_id.len != evt.event_id_size) return error.InvalidRepoId;
+    _ = try evt.parseEventId(&record.event.owner_id);
+    const repo_id = try evt.parseEventId(&record.event.repo_id);
     const thread_id = try evt.parseEventId(&record.event.thread_id);
-    if (!std.mem.eql(u8, event_id, &idOf(record.event.repo_id, &thread_id))) return error.InvalidNotifyId;
+    if (!std.mem.eql(u8, event_id, &idOf(&repo_id, &thread_id))) return error.InvalidNotifyId;
 }
 
 pub fn consume(

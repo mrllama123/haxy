@@ -41,18 +41,16 @@ pub fn init(arena: *std.heap.ArenaAllocator, session: *ui.Session, route: ui.Rou
     const forker_id = (try evt.User.readIdByName(evt.AdminDB, evt.admin_repo_opts.hash, haxy_moment, identity.owner)) orelse return error.NotFound;
     const fork_record = (try evt.readForkById(io, gpa, arena, users_dir, &forker_id, &id)) orelse return error.NotFound;
     if (fork_record.removed) return error.NotFound;
-    if (fork_record.event.repo_id.len != evt.event_id_size) return error.NotFound;
-    var target_id: [evt.event_id_size]u8 = undefined;
-    @memcpy(&target_id, fork_record.event.repo_id);
-    const owner_id = fork_record.event.repo_user_id[0..evt.event_id_size];
+    const target_id = try evt.parseEventId(&fork_record.event.repo_id);
+    const owner_id = try evt.parseEventId(&fork_record.event.repo_user_id);
 
-    const target = (try evt.readRepoById(io, gpa, arena, users_dir, owner_id, &target_id, session.userId())) orelse return error.NotFound;
+    const target = (try evt.readRepoById(io, gpa, arena, users_dir, &owner_id, &target_id, session.userId())) orelse return error.NotFound;
     // a draft is as readable as the repo it targets
     const target_role = target.role orelse return error.NotFound;
     const target_record = target.repo;
     // patches that are off take their drafts with them
     if (target_record.event.patch_role == null) return error.NotFound;
-    const owner = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, haxy_moment, arena, owner_id)) orelse return error.NotFound;
+    const owner = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, haxy_moment, arena, &owner_id)) orelse return error.NotFound;
     if (!std.mem.eql(u8, target_record.event.name, identity.name)) return error.NotFound;
 
     const aa = arena.allocator();
@@ -80,7 +78,7 @@ pub fn init(arena: *std.heap.ArenaAllocator, session: *ui.Session, route: ui.Rou
                 @memcpy(&commits_base_oid, revision.record.event.base_oid);
             }
 
-            const target_path = try evt.repoPath(aa, users_dir, owner_id, &target_id);
+            const target_path = try evt.repoPath(aa, users_dir, &owner_id, &target_id);
             const target_source = ui.RepoSource{ .path = target_path, .repo_kind = .xit };
             var target_repo_maybe: ?rp.Repo(.xit, repo_opts) = if (!target_record.removed)
                 rp.Repo(.xit, repo_opts).open(io, arena.child_allocator, target_source.localInitOpts()) catch null

@@ -140,7 +140,7 @@ fn handleGitRequest(
             try writeSimpleResponse(http_server, 403, "Forbidden", "text/plain", "private repos cannot be fetched over HTTP");
             return;
         }
-        break :blk try evt.repoPath(allocator, users_dir, repo.repo.event.user_id, &repo.event_id);
+        break :blk try evt.repoPath(allocator, users_dir, &try evt.parseEventId(&repo.repo.event.user_id), &repo.event_id);
     };
     defer allocator.free(repo_path);
 

@@ -3,9 +3,9 @@ const evt = @import("../event.zig");
 const xit = @import("xit");
 const hash = xit.hash;
 
-repo_id: []const u8,
+repo_id: [evt.event_id_size * 2]u8,
 // the target repo's owner, whose user repo holds the target
-repo_user_id: []const u8,
+repo_user_id: [evt.event_id_size * 2]u8,
 stage: Stage = .draft,
 
 // what the db stores: the event's data plus the commit-derived fields
@@ -30,8 +30,8 @@ pub const active_id_set_key = "active-fork-id-set";
 pub const repo_to_draft_id_set_key = "repo->draft-id-set";
 
 fn validate(record: Record) !void {
-    if (record.event.repo_id.len != evt.event_id_size) return error.InvalidRepoId;
-    if (record.event.repo_user_id.len != evt.event_id_size) return error.InvalidUserId;
+    _ = try evt.parseEventId(&record.event.repo_id);
+    _ = try evt.parseEventId(&record.event.repo_user_id);
 }
 
 pub fn consume(
@@ -59,15 +59,15 @@ pub fn consume(
     if (!record.removed) try validate(record);
 
     if (existing_maybe) |existing| {
-        if (!std.mem.eql(u8, existing.event.repo_id, record.event.repo_id) or
-            !std.mem.eql(u8, existing.event.repo_user_id, record.event.repo_user_id)) return error.ForkChanged;
+        if (!std.mem.eql(u8, &existing.event.repo_id, &record.event.repo_id) or
+            !std.mem.eql(u8, &existing.event.repo_user_id, &record.event.repo_user_id)) return error.ForkChanged;
         if (existing.event.stage == .publish and record.event.stage != .publish) return error.ForkAlreadyPublished;
         record.created_order = existing.created_order;
         if (!existing.removed) {
             const order_key = evt.orderKeyDesc(existing.created_order, event_id);
             _ = try active.remove(&order_key);
             if (existing.event.stage == .draft) {
-                try removeFromParentSet(DB, hash_kind, drafts, existing.event.repo_id, &order_key);
+                try removeFromParentSet(DB, hash_kind, drafts, &try evt.parseEventId(&existing.event.repo_id), &order_key);
             }
         }
     }
@@ -85,7 +85,8 @@ pub fn consume(
     if (!record.removed) {
         try active.put(&order_key);
         if (record.event.stage == .draft) {
-            const by_repo = try DB.SortedSet(.read_write).init(try drafts.putCursor(hash.hashInt(hash_kind, record.event.repo_id)));
+            const repo_id = try evt.parseEventId(&record.event.repo_id);
+            const by_repo = try DB.SortedSet(.read_write).init(try drafts.putCursor(hash.hashInt(hash_kind, &repo_id)));
             try by_repo.put(&order_key);
         }
     }
@@ -95,7 +96,7 @@ fn removeFromParentSet(
     comptime DB: type,
     comptime hash_kind: hash.HashKind,
     index: DB.HashMap(.read_write),
-    parent_id: []const u8,
+    parent_id: *const [evt.event_id_size]u8,
     order_key: *const [@sizeOf(u64) + evt.event_id_size]u8,
 ) !void {
     const cursor = try index.putCursor(hash.hashInt(hash_kind, parent_id));

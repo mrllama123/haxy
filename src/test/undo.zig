@@ -71,7 +71,7 @@ test "repo undo visibility and fresh owner authorization" {
     const repo_id: [evt.event_id_size]u8 = @splat(4);
     const author: evt.CommitAuthor = .{ .name = "test", .email = "test@example.test" };
     const writer_hex = std.fmt.bytesToHex(writer, .lower);
-    var repo_event: evt.Repo = .{ .user_id = &owner, .name = "demo", .description = "", .read_access = .public };
+    var repo_event: evt.Repo = .{ .user_id = std.fmt.bytesToHex(owner, .lower), .name = "demo", .description = "", .read_access = .public };
     const seed = [_]evt.EventWithId{
         .{ .id = std.fmt.bytesToHex(owner, .lower), .author = author, .event = .{ .user = .{ .name = "alice", .email = "alice@example.test", .password_hash = "unused" } } },
         .{ .id = writer_hex, .author = author, .event = .{ .user = .{ .name = "writer", .email = "writer@example.test", .password_hash = "unused" } } },
@@ -82,7 +82,7 @@ test "repo undo visibility and fresh owner authorization" {
     defer user_repo.deinit(io, allocator);
     try evt.consume(.{ .server = .{ .users_dir = users_dir } }, .user, .xit, evt.user_repo_opts, io, allocator, &user_repo, evt.events_ref, &.{
         .{ .id = std.fmt.bytesToHex(repo_id, .lower), .author = author, .event = .{ .repo = repo_event } },
-        .{ .id = std.fmt.bytesToHex(evt.Grant.idOf(&repo_id, &writer), .lower), .author = author, .event = .{ .grant = .{ .target_id = &repo_id, .user_id = &writer, .role = .write } } },
+        .{ .id = std.fmt.bytesToHex(evt.Grant.idOf(&repo_id, &writer), .lower), .author = author, .event = .{ .grant = .{ .target_id = std.fmt.bytesToHex(repo_id, .lower), .user_id = writer_hex, .role = .write } } },
     });
     const path = try evt.repoPath(aa, users_dir, &owner, &repo_id);
     {
@@ -129,7 +129,7 @@ test "repo undo visibility and fresh owner authorization" {
         try std.testing.expectEqualStrings("undo", data.items[0].action);
     }
     // keep the old session/page moment, but transfer ownership to the writer.
-    repo_event.user_id = &writer;
+    repo_event.user_id = writer_hex;
     try evt.consume(.{ .server = .{ .users_dir = users_dir } }, .user, .xit, evt.user_repo_opts, io, allocator, &user_repo, evt.events_ref, &.{.{ .id = std.fmt.bytesToHex(repo_id, .lower), .author = author, .event = .{ .repo = repo_event } }});
     session.next_page = null;
     Undo.handleRequest(allocator, &session, ui.RoutablePage.repoUndoRoute("alice:demo", 1).?.repo_undo);
@@ -137,7 +137,7 @@ test "repo undo visibility and fresh owner authorization" {
     try std.testing.expectEqual(null, session.next_page);
 
     // public-write repos still require login for history and undo.
-    repo_event.user_id = &owner;
+    repo_event.user_id = std.fmt.bytesToHex(owner, .lower);
     repo_event.write_access = .public;
     try evt.consume(.{ .server = .{ .users_dir = users_dir } }, .user, .xit, evt.user_repo_opts, io, allocator, &user_repo, evt.events_ref, &.{.{ .id = std.fmt.bytesToHex(repo_id, .lower), .author = author, .event = .{ .repo = repo_event } }});
     var anonymous = try ui.Session.init(&arena, &admin, .{});

@@ -295,7 +295,7 @@ fn readItem(
     const DB = evt.EventDB(hash_kind);
     // the parts of a record a row shows
     const Authored = struct { author_email: ?[]const u8 };
-    const Owned = struct { event: struct { user_id: []const u8 } };
+    const Owned = struct { event: struct { user_id: [evt.event_id_size * 2]u8 } };
     var item: Item = .{
         .id = try formatId(arena.allocator(), id),
         .kind = kind,
@@ -309,7 +309,7 @@ fn readItem(
         .repo => {
             const record = (try evt.readRecordSubset(evt.Repo, Owned, DB, hash_kind, haxy_moment, arena, id)) orelse return null;
             if (admin_moment) |moment| {
-                if (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, record.event.user_id)) |user|
+                if (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, &try evt.parseEventId(&record.event.user_id))) |user|
                     item.author = .{ .user_name = user.event.name };
             }
         },

@@ -250,7 +250,7 @@ pub fn main(init: std.process.Init) !void {
                 .author = author,
                 .event = .{
                     .repo = .{
-                        .user_id = &user_ids[r.user_index],
+                        .user_id = std.fmt.bytesToHex(user_ids[r.user_index], .lower),
                         .name = r.name,
                         .description = r.description,
                         .read_access = r.read_access,
@@ -264,7 +264,7 @@ pub fn main(init: std.process.Init) !void {
                 .id = std.fmt.bytesToHex(evt.Grant.idOf(&repo_event_ids[i], &admin_user_id), .lower),
                 .timestamp = seedTimestamp(now, i, repo_data.len, 90 * std.time.s_per_day, 70 * std.time.s_per_day),
                 .author = author,
-                .event = .{ .grant = .{ .target_id = &repo_event_ids[i], .user_id = &admin_user_id, .role = .owner } },
+                .event = .{ .grant = .{ .target_id = std.fmt.bytesToHex(repo_event_ids[i], .lower), .user_id = std.fmt.bytesToHex(admin_user_id, .lower), .role = .owner } },
             };
         }
 

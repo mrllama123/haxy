@@ -76,7 +76,7 @@ test "user and repo" {
         .author = author,
         .event = .{
             .repo = .{
-                .user_id = &user_event_id,
+                .user_id = std.fmt.bytesToHex(user_event_id, .lower),
                 .name = "ziglings",
                 .description = "Learn the Zig programming language by fixing tiny broken programs",
             },
@@ -116,7 +116,7 @@ test "user and repo" {
         const repo_map = try Repo.DB.HashMap(.read_only).init(repo_cursor);
         const repo_record = try evt.read(evt.Repo.Record, Repo.DB, repo_opts.hash, &arena, repo_map);
 
-        try std.testing.expectEqualSlices(u8, &user_event_id, repo_record.event.user_id);
+        try std.testing.expectEqualStrings(&std.fmt.bytesToHex(user_event_id, .lower), &repo_record.event.user_id);
         try std.testing.expectEqualStrings("ziglings", repo_record.event.name);
 
         // the repo resolves by its name alone
@@ -257,10 +257,10 @@ test "repos and users paginate newest first" {
         .{ .id = std.fmt.bytesToHex(user_id, .lower), .author = author, .timestamp = 100, .event = .{ .user = .{ .name = "alice", .email = "alice@example.test", .password_hash = pw } } },
     });
     const events = [_]evt.EventWithId{
-        .{ .id = std.fmt.bytesToHex(repo_ids[0], .lower), .author = author, .timestamp = 10_000, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo0", .description = "d0" } } },
-        .{ .id = std.fmt.bytesToHex(repo_ids[1], .lower), .author = author, .timestamp = 10, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo1", .description = "d1" } } },
-        .{ .id = std.fmt.bytesToHex(repo_ids[2], .lower), .author = author, .timestamp = 5_000, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo2", .description = "d2" } } },
-        .{ .id = std.fmt.bytesToHex(repo_ids[3], .lower), .author = author, .timestamp = 20, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo3", .description = "d3" } } },
+        .{ .id = std.fmt.bytesToHex(repo_ids[0], .lower), .author = author, .timestamp = 10_000, .event = .{ .repo = .{ .user_id = std.fmt.bytesToHex(user_id, .lower), .name = "repo0", .description = "d0" } } },
+        .{ .id = std.fmt.bytesToHex(repo_ids[1], .lower), .author = author, .timestamp = 10, .event = .{ .repo = .{ .user_id = std.fmt.bytesToHex(user_id, .lower), .name = "repo1", .description = "d1" } } },
+        .{ .id = std.fmt.bytesToHex(repo_ids[2], .lower), .author = author, .timestamp = 5_000, .event = .{ .repo = .{ .user_id = std.fmt.bytesToHex(user_id, .lower), .name = "repo2", .description = "d2" } } },
+        .{ .id = std.fmt.bytesToHex(repo_ids[3], .lower), .author = author, .timestamp = 20, .event = .{ .repo = .{ .user_id = std.fmt.bytesToHex(user_id, .lower), .name = "repo3", .description = "d3" } } },
     };
     try evt.consume(.{ .server = .{ .users_dir = temp_path } }, .user, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &events);
 
@@ -286,7 +286,7 @@ test "repos and users paginate newest first" {
 
     // update repo0 at a later timestamp -> keeps its original place
     try evt.consume(.{ .server = .{ .users_dir = temp_path } }, .user, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{
-        .{ .id = std.fmt.bytesToHex(repo_ids[0], .lower), .author = author, .timestamp = 300, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo0", .description = "updated" } } },
+        .{ .id = std.fmt.bytesToHex(repo_ids[0], .lower), .author = author, .timestamp = 300, .event = .{ .repo = .{ .user_id = std.fmt.bytesToHex(user_id, .lower), .name = "repo0", .description = "updated" } } },
     });
     {
         const moment = try evt.currentMoment(repo_opts, &repo);
@@ -346,7 +346,7 @@ test "fork query and removal lifecycle" {
             .timestamp = 1,
             .author = author,
             .event = .{ .repo = .{
-                .user_id = &user_id,
+                .user_id = std.fmt.bytesToHex(user_id, .lower),
                 .name = "repo",
                 .description = "",
             } },
@@ -383,8 +383,8 @@ test "fork query and removal lifecycle" {
     defer arena.deinit();
     var moment = try evt.currentMoment(evt.user_repo_opts, &user_repo);
     var record = (try evt.Fork.readById(evt.UserDB, evt.user_repo_opts.hash, moment, &arena, &fork_id)) orelse return error.NotFound;
-    try std.testing.expectEqualSlices(u8, &repo_id, record.event.repo_id);
-    try std.testing.expectEqualSlices(u8, &user_id, record.event.repo_user_id);
+    try std.testing.expectEqualStrings(&std.fmt.bytesToHex(repo_id, .lower), &record.event.repo_id);
+    try std.testing.expectEqualStrings(&std.fmt.bytesToHex(user_id, .lower), &record.event.repo_user_id);
     try std.testing.expectEqual(.draft, record.event.stage);
     try std.testing.expectEqual(1, try activeForkCount(moment));
     try std.testing.expectEqual(1, try draftForkCount(moment, &repo_id));
