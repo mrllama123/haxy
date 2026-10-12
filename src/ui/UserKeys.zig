@@ -173,6 +173,7 @@ pub const View = struct {
             .invalid => " add ssh key (invalid) ",
             .unsupported => " add ssh key (unsupported type) ",
             .already_added => " add ssh key (already added) ",
+            .too_many => " add ssh key (too many keys) ",
         } else add_label;
         add.options.bottom_label.text = if (root_focus.grandchild_id == add.getFocus().id) " press enter " else "";
         // the web form handling finds the inputs by focus id

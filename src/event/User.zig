@@ -28,6 +28,8 @@ const Self = @This();
 
 pub const name_min_len = 4;
 pub const name_max_len = 32;
+// how many ssh keys a user may hold, so the keys tab stays one short page
+pub const ssh_key_max_count = 50;
 
 // the moment keys `evt.merge` reads and writes for this kind
 pub const merge_policy: evt.MergePolicy = .target_wins;

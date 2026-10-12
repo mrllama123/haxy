@@ -2309,6 +2309,7 @@ fn writeUserKeys(
     if (user.removed) return error.NotFound;
 
     var keys: std.ArrayList(u8) = .empty;
+    var count: usize = 0;
     var held = false;
     var lines = std.mem.splitScalar(u8, user.event.ssh_keys, '\n');
     while (lines.next()) |line| {
@@ -2319,9 +2320,11 @@ fn writeUserKeys(
         }
         if (keys.items.len > 0) try keys.append(arena.allocator(), '\n');
         try keys.appendSlice(arena.allocator(), line);
+        count += 1;
     }
     if (added) |key| {
         if (held) return error.KeyAdded;
+        if (count >= User.ssh_key_max_count) return error.TooManyKeys;
         if (keys.items.len > 0) try keys.append(arena.allocator(), '\n');
         try keys.appendSlice(arena.allocator(), key);
     } else if (!held) return;

@@ -2374,12 +2374,14 @@ pub const Session = struct {
             invalid,
             unsupported,
             already_added,
+            too_many,
 
             pub fn fromError(err: anyerror) ?KeyFailure {
                 return switch (err) {
                     error.InvalidKey => .invalid,
                     error.UnsupportedKey => .unsupported,
                     error.KeyAdded => .already_added,
+                    error.TooManyKeys => .too_many,
                     else => null,
                 };
             }
