@@ -212,9 +212,9 @@ pub fn init(
         .repo_events => |*e| e.selected.slice(),
         else => "",
     };
-    const roles_start: usize = switch (route) {
-        .repo_roles => |r| r.start,
-        else => 0,
+    const roles_route: ui.RoutablePage.RepoRolesRoute = switch (route) {
+        .repo_roles => |r| r,
+        else => .{ .name = .{} },
     };
     // the thread the route shows, whose notif viewing it reads
     const viewed_thread: []const u8 = switch (route) {
@@ -326,7 +326,7 @@ pub fn init(
                                     .patch_role = repo.event.patch_role,
                                     .hash_kind = opened.self_repo_opts.hash,
                                     .view = if (route == .repo_roles) .roles else .settings,
-                                    .roles = try Roles.init(io, gpa, arena, session.haxy_moment orelse return error.NoMoment, session.users_dir orelse return error.NoMoment, repo_identity.identity, &owner_id, &repo_id, roles_start),
+                                    .roles = try Roles.init(io, gpa, arena, session.haxy_moment orelse return error.NoMoment, session.users_dir orelse return error.NoMoment, repo_identity.identity, &owner_id, &repo_id, roles_route.start, if (roles_route.confirm) |action| .{ .action = action, .name = roles_route.user.slice() } else null),
                                 };
                             }
                             // tabs switch in-page, so every tab's data is read here

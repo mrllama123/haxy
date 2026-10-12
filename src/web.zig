@@ -170,8 +170,8 @@ fn handleRequest(
                             .@"repo/new" => handleRepoNew(io, request, allocator, path, server.admin_repo_path, server.users_dir, server.session_store),
                             .@"user/new" => handleUserNew(io, request, allocator, path, server.admin_repo_path, server.users_dir, server.session_store),
                             .user => handleUserSettings(io, request, allocator, base, server.admin_repo_path, server.users_dir, server.session_store),
-                            .addkey => handleUserKey(io, request, allocator, base, server.admin_repo_path, server.users_dir, server.session_store, .add),
-                            .removekey => handleUserKey(io, request, allocator, base, server.admin_repo_path, server.users_dir, server.session_store, .remove),
+                            .addkey => handleUserKeyAdd(io, request, allocator, base, server.admin_repo_path, server.users_dir, server.session_store),
+                            .removekey => handleUserKeyRemove(io, request, allocator, base, server.admin_repo_path, server.users_dir, server.session_store),
                             .settings => handleRepoSettings(io, request, allocator, path, host),
                             .grant => handleRoles(io, request, allocator, base, host, .grant),
                             .revoke => handleRoles(io, request, allocator, base, host, .revoke),
@@ -897,9 +897,9 @@ fn handleUserSettings(
     });
 }
 
-// add or remove one of the logged-in user's ssh keys, then return to the ssh
-// keys tab that posted the form, which a failure also goes back to.
-fn handleUserKey(
+// add one of the logged-in user's ssh keys, then return to the ssh keys tab
+// that posted the form, which a failure also goes back to.
+fn handleUserKeyAdd(
     io: std.Io,
     request: *std.http.Server.Request,
     allocator: std.mem.Allocator,
@@ -907,7 +907,6 @@ fn handleUserKey(
     admin_repo_path: []const u8,
     users_dir: []const u8,
     session_store: SessionStore,
-    action: evt.KeyAction,
 ) !void {
     const user_id = requestUserId(request, session_store) orelse return respondLoginRequired(request);
 
@@ -919,7 +918,7 @@ fn handleUserKey(
     {
         var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = admin_repo_path });
         defer admin_repo.deinit(io, allocator);
-        evt.changeUserKey(io, allocator, users_dir, &admin_repo, &user_id, action, key) catch |err| switch (err) {
+        evt.addUserKey(io, allocator, users_dir, &admin_repo, &user_id, key) catch |err| switch (err) {
             error.NotFound => return respondLoginRequired(request),
             else => {
                 const failure = ui.Session.FormFeedback.KeyFailure.fromError(err) orelse return err;
@@ -931,6 +930,47 @@ fn handleUserKey(
     try request.respond("", .{
         .status = .see_other,
         .extra_headers = &.{.{ .name = "location", .value = form_location }},
+    });
+}
+
+// remove the logged-in user's ssh key the confirmation url names, then return
+// to the ssh keys tab
+fn handleUserKeyRemove(
+    io: std.Io,
+    request: *std.http.Server.Request,
+    allocator: std.mem.Allocator,
+    base: []const u8,
+    admin_repo_path: []const u8,
+    users_dir: []const u8,
+    session_store: SessionStore,
+) !void {
+    const user_id = requestUserId(request, session_store) orelse return respondLoginRequired(request);
+    const route = ui.RoutablePage.fromUrl(base) orelse return respondKeyNotFound(request);
+    const tab = route.userTab();
+    if (tab.view != .keys or tab.key.len != evt.User.fingerprint_len) return respondKeyNotFound(request);
+
+    {
+        var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = admin_repo_path });
+        defer admin_repo.deinit(io, allocator);
+        evt.removeUserKey(io, allocator, users_dir, &admin_repo, &user_id, &tab.key.bytes) catch |err| switch (err) {
+            error.NotFound => return respondLoginRequired(request),
+            else => return err,
+        };
+    }
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const location = try route.withUserTab(.{ .view = .keys }).toUrl(&arena);
+    try request.respond("", .{
+        .status = .see_other,
+        .extra_headers = &.{.{ .name = "location", .value = location }},
+    });
+}
+
+fn respondKeyNotFound(request: *std.http.Server.Request) !void {
+    try request.respond("ssh key not found", .{
+        .status = .not_found,
+        .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
     });
 }
 

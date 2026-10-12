@@ -222,6 +222,14 @@ pub const RoutablePage = union(enum) {
     pub const UserTab = struct {
         view: UserView = .notifications,
         start: usize = 0,
+        // the fingerprint of the ssh key a keys route acts on ("" = none)
+        key: Array(evt.User.fingerprint_len) = .{},
+        // the confirmation of removing `key`
+        remove_key: bool = false,
+
+        pub fn eql(a: UserTab, b: UserTab) bool {
+            return a.view == b.view and a.start == b.start and std.mem.eql(u8, a.key.slice(), b.key.slice()) and a.remove_key == b.remove_key;
+        }
     };
 
     pub const RefOrOid = enum {
@@ -232,7 +240,7 @@ pub const RoutablePage = union(enum) {
 
     // the "key:value" segments of a url tail, collected in any order
     const Params = struct {
-        const ParamKey = enum { start, line, branch, tag, object, base, patchrev, theirs, find, search, from, moment, merge, user };
+        const ParamKey = enum { start, line, branch, tag, object, base, patchrev, theirs, find, search, from, moment, merge, user, key };
 
         // a branch:/tag:/object: param; the value stays url-encoded
         const RefParam = struct { kind: RefOrOid, value: []const u8 };
@@ -326,6 +334,9 @@ pub const RoutablePage = union(enum) {
     const merge_seg = @tagName(Params.ParamKey.merge) ++ ":";
     const theirs_seg = @tagName(Params.ParamKey.theirs) ++ ":";
     const user_seg = @tagName(Params.ParamKey.user) ++ ":";
+    const key_seg = @tagName(Params.ParamKey.key) ++ ":";
+    // ends a key removal's confirmation url, so its form posts to the removal
+    const remove_key_word = "removekey";
     const issue_seg = "issue:";
     const patch_seg = "patch:";
     const discuss_seg = "discuss:";
@@ -432,6 +443,8 @@ pub const RoutablePage = union(enum) {
         start: usize = 0,
         // the user a row's form acts on ("" = none)
         user: Array(evt.User.name_max_len) = .{},
+        // the confirmation of taking `user`'s role away
+        confirm: ?Repo.Roles.Action = null,
     };
 
     pub fn repoSettingsRoute(identity: []const u8) ?RoutablePage {
@@ -1262,6 +1275,7 @@ pub const RoutablePage = union(enum) {
                 try out.writer.print("{s}/repo/roles", .{try repoUrlPrefix(arena, r.name.slice())});
                 if (r.user.len != 0) try out.writer.print("/" ++ user_seg ++ "{s}", .{r.user.slice()});
                 if (r.start != 0) try out.writer.print("/" ++ start_seg ++ "{d}", .{r.start});
+                if (r.confirm) |action| try out.writer.print("/{s}", .{@tagName(action)});
                 break :blk out.written();
             },
             .repo_user => |u| try userTabUrl(arena, try repoUrlPrefix(arena, u.name.slice()), u.tab),
@@ -1300,7 +1314,13 @@ pub const RoutablePage = union(enum) {
     fn userTabUrl(arena: *std.heap.ArenaAllocator, prefix: []const u8, tab: UserTab) ![]const u8 {
         return switch (tab.view) {
             .settings => try arena.allocator().print("{s}/user/settings", .{prefix}),
-            .keys => try arena.allocator().print("{s}/user/keys", .{prefix}),
+            .keys => blk: {
+                var out: std.Io.Writer.Allocating = .init(arena.allocator());
+                try out.writer.print("{s}/user/keys", .{prefix});
+                if (tab.key.len != 0) try out.writer.print("/" ++ key_seg ++ "{s}", .{try urlEncodeRef(arena.allocator(), tab.key.slice())});
+                if (tab.remove_key) try out.writer.writeAll("/" ++ remove_key_word);
+                break :blk out.written();
+            },
             .notifications => if (tab.start == 0)
                 try arena.allocator().print("{s}/user/notifications", .{prefix})
             else
@@ -1505,14 +1525,34 @@ pub const RoutablePage = union(enum) {
     }
 
     // the tail after a page's "user": none or "notifications" with an optional
-    // "start:<n>", "settings", "keys", or "new"
+    // "start:<n>", "settings", "keys" with an optional "key:<fingerprint>" and
+    // removal confirmation, or "new"
     fn userTail(segments: *std.mem.SplitIterator(u8, .scalar)) ?union(enum) { new, tab: UserTab } {
         const word = segments.next() orelse return .{ .tab = .{} };
         if (std.mem.eql(u8, word, "new")) return if (segments.next() == null) .new else null;
         return switch (std.meta.stringToEnum(UserView, word) orelse return null) {
-            inline .settings, .keys => |view| if (segments.next() == null) .{ .tab = .{ .view = view } } else null,
+            .settings => if (segments.next() == null) .{ .tab = .{ .view = .settings } } else null,
+            .keys => .{ .tab = keysTab(segments) orelse return null },
             .notifications => .{ .tab = .{ .start = listStart(segments) orelse return null } },
         };
+    }
+
+    fn keysTab(segments: *std.mem.SplitIterator(u8, .scalar)) ?UserTab {
+        var params = Params{};
+        const word = params.scanTail(segments) catch return null;
+        if (!params.only(&.{.key})) return null;
+        var tab: UserTab = .{ .view = .keys };
+        if (params.values.get(.key)) |encoded| {
+            var buf: [3 * evt.User.fingerprint_len]u8 = undefined;
+            if (encoded.len > buf.len) return null;
+            @memcpy(buf[0..encoded.len], encoded);
+            tab.key = Array(evt.User.fingerprint_len).from(std.Uri.percentDecodeInPlace(buf[0..encoded.len])) orelse return null;
+        }
+        if (word) |value| {
+            if (!std.mem.eql(u8, value, remove_key_word) or tab.key.len == 0) return null;
+            tab.remove_key = true;
+        }
+        return tab;
     }
 
     fn listStart(segments: *std.mem.SplitIterator(u8, .scalar)) ?usize {
@@ -1549,9 +1589,16 @@ pub const RoutablePage = union(enum) {
             }
             if (std.mem.eql(u8, word, "roles")) {
                 _ = segments.next();
-                const roles_params = listParams(&segments, &.{ .user, .start }) orelse return null;
-                var route = repoRolesRoute(pair, roles_params.start() orelse return null) orelse return null;
-                if (roles_params.values.get(.user)) |user| route.repo_roles.user = Array(evt.User.name_max_len).from(user) orelse return null;
+                const confirm_word = params.scanTail(&segments) catch return null;
+                if (!params.only(&.{ .user, .start })) return null;
+                var route = repoRolesRoute(pair, params.start() orelse return null) orelse return null;
+                if (params.values.get(.user)) |user| route.repo_roles.user = Array(evt.User.name_max_len).from(user) orelse return null;
+                if (confirm_word) |value| {
+                    // only taking a role away asks first, and it names whose
+                    const action = std.meta.stringToEnum(Repo.Roles.Action, value) orelse return null;
+                    if ((action != .revoke and action != .demote) or route.repo_roles.user.len == 0) return null;
+                    route.repo_roles.confirm = action;
+                }
                 return route;
             }
             return if (isNewTail(&segments)) .{ .repo_repo_new = Array(repo_route_max_len).from(pair) orelse return null } else null;
@@ -1808,12 +1855,12 @@ pub const RoutablePage = union(enum) {
         if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
         return switch (a) {
             .home_users => |a_u| a_u.start == b.home_users.start and std.mem.eql(u8, a_u.search.slice(), b.home_users.search.slice()),
-            .home_user => |a_t| std.meta.eql(a_t, b.home_user),
+            .home_user => |a_t| a_t.eql(b.home_user),
             .user_repos => |a_u| std.mem.eql(u8, a_u.name.slice(), b.user_repos.name.slice()) and a_u.start == b.user_repos.start and std.mem.eql(u8, a_u.search.slice(), b.user_repos.search.slice()),
             .user_forks => |a_u| std.mem.eql(u8, a_u.name.slice(), b.user_forks.name.slice()) and a_u.start == b.user_forks.start,
             .user_repo_new => |a_name| std.mem.eql(u8, a_name.slice(), b.user_repo_new.slice()),
             .user_user_new => |a_name| std.mem.eql(u8, a_name.slice(), b.user_user_new.slice()),
-            .user_user => |a_u| std.mem.eql(u8, a_u.name.slice(), b.user_user.name.slice()) and std.meta.eql(a_u.tab, b.user_user.tab),
+            .user_user => |a_u| std.mem.eql(u8, a_u.name.slice(), b.user_user.name.slice()) and a_u.tab.eql(b.user_user.tab),
             .repo_files => |a_f| std.mem.eql(u8, a_f.name.slice(), b.repo_files.name.slice()) and
                 a_f.ref_kind == b.repo_files.ref_kind and
                 std.mem.eql(u8, a_f.ref_value.slice(), b.repo_files.ref_value.slice()) and
@@ -1869,8 +1916,9 @@ pub const RoutablePage = union(enum) {
             .repo_settings => |a_name| std.mem.eql(u8, a_name.slice(), b.repo_settings.slice()),
             .repo_roles => |a_r| std.mem.eql(u8, a_r.name.slice(), b.repo_roles.name.slice()) and
                 a_r.start == b.repo_roles.start and
-                std.mem.eql(u8, a_r.user.slice(), b.repo_roles.user.slice()),
-            .repo_user => |a_u| std.mem.eql(u8, a_u.name.slice(), b.repo_user.name.slice()) and std.meta.eql(a_u.tab, b.repo_user.tab),
+                std.mem.eql(u8, a_r.user.slice(), b.repo_roles.user.slice()) and
+                a_r.confirm == b.repo_roles.confirm,
+            .repo_user => |a_u| std.mem.eql(u8, a_u.name.slice(), b.repo_user.name.slice()) and a_u.tab.eql(b.repo_user.tab),
             .fork_patch => |a_f| std.mem.eql(u8, a_f.name.slice(), b.fork_patch.name.slice()) and std.mem.eql(u8, a_f.id.slice(), b.fork_patch.id.slice()),
             .fork_diff => |a_d| std.mem.eql(u8, a_d.fork.name.slice(), b.fork_diff.fork.name.slice()) and
                 std.mem.eql(u8, a_d.fork.id.slice(), b.fork_diff.fork.id.slice()) and
@@ -1891,7 +1939,7 @@ pub const RoutablePage = union(enum) {
             .fork_user_new => |a_f| std.mem.eql(u8, a_f.name.slice(), b.fork_user_new.name.slice()) and std.mem.eql(u8, a_f.id.slice(), b.fork_user_new.id.slice()),
             .fork_user => |a_u| std.mem.eql(u8, a_u.fork.name.slice(), b.fork_user.fork.name.slice()) and
                 std.mem.eql(u8, a_u.fork.id.slice(), b.fork_user.fork.id.slice()) and
-                std.meta.eql(a_u.tab, b.fork_user.tab),
+                a_u.tab.eql(b.fork_user.tab),
             else => true,
         };
     }

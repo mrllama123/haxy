@@ -1959,7 +1959,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     const action = try aa.print("form:{s}", .{page_url});
                     const event_name = if (data.comment_id.len == 0) thread_name else "comment";
                     var label_buf: ["remove ".len + @max(thread_name.len, "comment".len)]u8 = undefined;
-                    var buttons: [2]ConfirmationButton = undefined;
+                    var buttons: [2]widget.ConfirmationButton = undefined;
                     buttons[0] = .{ .label = switch (confirmation_kind) {
                         .remove => try std.fmt.bufPrint(&label_buf, "remove {s}", .{event_name}),
                         .publish => "publish patch",
@@ -1982,7 +1982,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                             button_count += 1;
                         } else unreachable;
                     }
-                    var center = try initConfirmationForm(allocator, action, buttons[0..button_count]);
+                    var center = try widget.initConfirmationForm(allocator, action, buttons[0..button_count]);
                     errdefer center.deinit(allocator);
                     try stack.children.put(allocator, center.getFocus().id, .{ .center = center });
                 } else if (data.view == .new_comment or data.view == .edit_comment) {
@@ -2240,33 +2240,6 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
 
             try addSubmitButtonLabeled(allocator, &box, "submit");
             return box;
-        }
-
-        const ConfirmationButton = struct {
-            label: []const u8,
-            bottom_label: []const u8 = "",
-            action: []const u8 = "submit",
-        };
-
-        fn initConfirmationForm(allocator: std.mem.Allocator, action: []const u8, buttons: []const ConfirmationButton) !Center {
-            var box = try wgt.Box(Widget).init(allocator, .{ .border = null, .round_corners = true, .direction = .vert });
-            errdefer box.deinit(allocator);
-            box.getFocus().kind = .{ .custom = action };
-
-            var prompt = try wgt.Text.init(allocator, "are you sure?");
-            errdefer prompt.deinit(allocator);
-            try box.children.put(allocator, prompt.getFocus().id, .{ .widget = .{ .text = prompt }, .rect = null, .min_size = null });
-
-            for (buttons, 0..) |options, index| {
-                var button = try wgt.TextBox.init(allocator, options.label, .{ .border = .single, .round_corners = true, .wrap_kind = .none, .bottom_label = .{ .text = options.bottom_label } });
-                errdefer button.deinit(allocator);
-                button.getFocus().mode = .all;
-                button.getFocus().kind = .{ .custom = options.action };
-                try box.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = null });
-                if (index == 0) box.getFocus().child_id = button.getFocus().id;
-            }
-
-            return Center.init(allocator, .{ .box = box });
         }
 
         // a form's submit button, then a spacer absorbing the leftover

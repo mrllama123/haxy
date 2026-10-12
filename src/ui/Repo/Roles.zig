@@ -21,8 +21,12 @@ identity: []const u8,
 start: usize,
 next_start: ?usize = null,
 rows: []const Row,
+// the role change the route asks to confirm, which stands in for the list
+confirm: ?Confirm = null,
 
 const Self = @This();
+
+pub const Confirm = struct { action: Action, name: []const u8 };
 
 pub const Row = struct {
     name: []const u8,
@@ -43,6 +47,7 @@ pub fn init(
     owner_id: *const [evt.event_id_size]u8,
     repo_id: *const [evt.event_id_size]u8,
     start: usize,
+    confirm: ?Confirm,
 ) !Self {
     const aa = arena.allocator();
     const grants = try evt.readRepoGrants(io, allocator, arena, users_dir, owner_id, repo_id);
@@ -65,7 +70,21 @@ pub fn init(
         }
         try rows.append(aa, .{ .name = user.event.name, .role = grant.role });
     }
-    return .{ .identity = try aa.dupe(u8, identity), .start = start, .next_start = next_start, .rows = rows.items };
+    return .{
+        .identity = try aa.dupe(u8, identity),
+        .start = start,
+        .next_start = next_start,
+        .rows = rows.items,
+        .confirm = if (confirm) |value| .{ .action = value.action, .name = try aa.dupe(u8, value.name) } else null,
+    };
+}
+
+// the confirmation of taking `name`'s role away
+fn confirmRoute(identity: []const u8, start: usize, name: []const u8, action: Action) !ui.RoutablePage {
+    var route = ui.RoutablePage.repoRolesRoute(identity, start) orelse return error.RouteTooLong;
+    route.repo_roles.user = ui.RoutablePage.Array(evt.User.name_max_len).from(name) orelse return error.RouteTooLong;
+    route.repo_roles.confirm = action;
+    return route;
 }
 
 // act on `name`'s role in the repo `identity` names as `actor`, one of its
@@ -129,9 +148,23 @@ pub const View = struct {
     const add_index = 0;
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
+        const aa = session.page_arena.allocator();
+        if (data.confirm) |confirm| {
+            const url = try (try confirmRoute(data.identity, data.start, confirm.name, confirm.action)).toUrl(session.page_arena);
+            var center = try ui.widget.initConfirmationForm(allocator, try aa.print("form:{s}", .{url}), &.{.{
+                .label = if (confirm.action == .demote) "demote to collaborator" else "remove user",
+                .bottom_label = try aa.print(" {s} ", .{confirm.name}),
+            }});
+            errdefer center.deinit(allocator);
+            return .{
+                .scroll = try wgt.Scroll(ui.Widget).init(allocator, .{ .center = center }, .{ .direction = .vert, .web_native = !session.is_terminal, .fill = true }),
+                .data = data,
+                .session = session,
+            };
+        }
+
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .vert });
         errdefer box.deinit(allocator);
-        const aa = session.page_arena.allocator();
         const route = ui.RoutablePage.repoRolesRoute(data.identity, data.start) orelse return error.RouteTooLong;
         const url = try route.toUrl(session.page_arena);
 
@@ -169,11 +202,19 @@ pub const View = struct {
                 name.options.bottom_label.text = if (row.role == .owner) " owner " else " collaborator ";
                 try row_box.children.put(allocator, name.getFocus().id, .{ .widget = .{ .text_box = name }, .rect = null, .min_size = null });
             }
-            try addButton(allocator, &row_box, "remove", try aa.print("submit:{s}/revoke", .{row_url}));
-            if (row.role == .owner)
-                try addButton(allocator, &row_box, "demote to collaborator", try aa.print("submit:{s}/demote", .{row_url}))
-            else
-                try addButton(allocator, &row_box, "promote to owner", try aa.print("submit:{s}/promote", .{row_url}));
+            // taking a role away asks first
+            if (row.role == .owner) {
+                const demote_route = try confirmRoute(data.identity, data.start, row.name, .demote);
+                try addButton(allocator, &row_box, "demote to collaborator", try aa.print("a:{s}", .{try demote_route.toUrl(session.page_arena)}));
+            } else try addButton(allocator, &row_box, "promote to owner", try aa.print("submit:{s}/promote", .{row_url}));
+            {
+                const revoke_route = try confirmRoute(data.identity, data.start, row.name, .revoke);
+                var remove = try wgt.TextBox.init(allocator, "✕", .{ .border = .single, .round_corners = true, .wrap_kind = .none });
+                errdefer remove.deinit(allocator);
+                remove.getFocus().mode = .all;
+                remove.getFocus().kind = .{ .custom = try aa.print("a:{s}", .{try revoke_route.toUrl(session.page_arena)}) };
+                try row_box.children.put(allocator, remove.getFocus().id, .{ .widget = .{ .text_box = remove }, .rect = null, .min_size = .{ .width = 3, .height = null } });
+            }
             row_box.getFocus().child_id = row_box.children.keys()[0];
             try box.children.put(allocator, row_box.getFocus().id, .{ .widget = .{ .box = row_box }, .rect = null, .min_size = null });
         }
@@ -223,15 +264,7 @@ pub const View = struct {
 
     pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
         self.clearGrid();
-        const name = self.nameInput();
-        const failure = if (self.session.formFeedback(.repo_roles)) |saved| saved.failure else null;
-        name.options.top_label.text = if (failure) |value| switch (value) {
-            .not_found => " add a collaborator (not found) ",
-            .already_added => " add a collaborator (already added) ",
-        } else " add a collaborator ";
-        name.options.bottom_label.text = if (root_focus.grandchild_id == name.getFocus().id) " press enter " else "";
-        // the web form handling finds the input by focus id
-        try self.session.text_inputs.put(self.session.arena.allocator(), name.getFocus().id, name);
+        if (self.data.confirm == null) try self.labelAddInput(root_focus);
         // the window's height as a minimum centers rows that fit
         try self.scroll.build(allocator, .{
             .min_size = .{ .width = constraint.min_size.width, .height = constraint.max_size.height orelse constraint.min_size.height },
@@ -239,7 +272,25 @@ pub const View = struct {
         }, root_focus);
     }
 
+    // label the add input for this frame and register it for the web form
+    // handling
+    fn labelAddInput(self: *View, root_focus: *Focus) !void {
+        const name = self.nameInput();
+        const failure = if (self.session.formFeedback(.repo_roles)) |saved| saved.failure else null;
+        name.options.top_label.text = if (failure) |value| switch (value) {
+            .not_found => " add a collaborator (not found) ",
+            .already_added => " add a collaborator (already added) ",
+        } else " add a collaborator ";
+        name.options.bottom_label.text = if (root_focus.grandchild_id == name.getFocus().id) " press enter " else "";
+        try self.session.text_inputs.put(self.session.arena.allocator(), name.getFocus().id, name);
+    }
+
     pub fn input(self: *View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
+        if (self.data.confirm) |confirm| {
+            const button_id = self.contentBox().getFocus().child_id orelse return;
+            if (inp.activated(root_focus, button_id, key)) try self.act(allocator, confirm.action, confirm.name);
+            return;
+        }
         // the add row keeps every key but the vertical ones, which move between rows
         if (self.addActive() and inp.vertDirection(key) == .none) {
             if (key == .enter) {
@@ -264,14 +315,11 @@ pub const View = struct {
                 if (current < offset or current - offset >= self.data.rows.len) return;
                 const row = self.data.rows[current - offset];
                 const row_box = &rows.children.values()[current].widget.box;
+                // remove and demote are links to their confirmations, which the host follows
+                if (row.role == .owner) return;
                 const button_id = row_box.getFocus().child_id orelse return;
-                if (!inp.activated(root_focus, button_id, key)) return;
-                const action: Action = switch (row_box.children.getIndex(button_id) orelse return) {
-                    1 => .revoke,
-                    2 => if (row.role == .owner) .demote else .promote,
-                    else => return,
-                };
-                try self.act(allocator, action, row.name);
+                if (row_box.children.getIndex(button_id) != 1 or !inp.activated(root_focus, button_id, key)) return;
+                try self.act(allocator, .promote, row.name);
             },
         }
     }
@@ -308,8 +356,8 @@ pub const View = struct {
         return self.scroll.getFocus();
     }
 
-    // up leaves the view from the add row
+    // up leaves the view from the add row or the confirmation
     pub fn atTop(self: *View) bool {
-        return self.addActive();
+        return self.data.confirm != null or self.addActive();
     }
 };

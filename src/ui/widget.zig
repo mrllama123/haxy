@@ -350,6 +350,34 @@ pub fn initEmpty(allocator: std.mem.Allocator) !Center {
     return Center.init(allocator, .{ .text_box = text_box });
 }
 
+pub const ConfirmationButton = struct {
+    label: []const u8,
+    bottom_label: []const u8 = "",
+    action: []const u8 = "submit",
+};
+
+// "are you sure?" over the buttons, in a form posting to `action`
+pub fn initConfirmationForm(allocator: std.mem.Allocator, action: []const u8, buttons: []const ConfirmationButton) !Center {
+    var box = try wgt.Box(Widget).init(allocator, .{ .border = null, .round_corners = true, .direction = .vert });
+    errdefer box.deinit(allocator);
+    box.getFocus().kind = .{ .custom = action };
+
+    var prompt = try wgt.Text.init(allocator, "are you sure?");
+    errdefer prompt.deinit(allocator);
+    try box.children.put(allocator, prompt.getFocus().id, .{ .widget = .{ .text = prompt }, .rect = null, .min_size = null });
+
+    for (buttons, 0..) |options, index| {
+        var button = try wgt.TextBox.init(allocator, options.label, .{ .border = .single, .round_corners = true, .wrap_kind = .none, .bottom_label = .{ .text = options.bottom_label } });
+        errdefer button.deinit(allocator);
+        button.getFocus().mode = .all;
+        button.getFocus().kind = .{ .custom = options.action };
+        try box.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = null });
+        if (index == 0) box.getFocus().child_id = button.getFocus().id;
+    }
+
+    return Center.init(allocator, .{ .box = box });
+}
+
 pub const FlowBox = struct {
     focus: *Focus,
     grid: ?Grid,

@@ -2259,17 +2259,13 @@ pub fn updateUser(
     }});
 }
 
-pub const KeyAction = enum { add, remove };
-
-// add an authorized_keys line to the user's ssh keys, or remove the lines
-// holding the same key. removing a key they don't hold writes nothing.
-pub fn changeUserKey(
+// add an authorized_keys line to the user's ssh keys
+pub fn addUserKey(
     io: std.Io,
     allocator: std.mem.Allocator,
     users_dir: []const u8,
     admin_repo: *rp.Repo(.xit, admin_repo_opts),
     user_id: *const [event_id_size]u8,
-    action: KeyAction,
     key_text: []const u8,
 ) !void {
     const key = std.mem.trim(u8, key_text, " \t\r");
@@ -2278,8 +2274,34 @@ pub fn changeUserKey(
     const fingerprint = User.fingerprintOfKey(key) orelse return error.InvalidKey;
     // the key types the ssh server verifies
     const key_type = std.mem.sliceTo(key, ' ');
-    if (action == .add and !std.mem.eql(u8, key_type, "ssh-ed25519") and !std.mem.eql(u8, key_type, "ssh-rsa")) return error.UnsupportedKey;
+    if (!std.mem.eql(u8, key_type, "ssh-ed25519") and !std.mem.eql(u8, key_type, "ssh-rsa")) return error.UnsupportedKey;
+    try writeUserKeys(io, allocator, users_dir, admin_repo, user_id, &fingerprint, key);
+}
 
+// remove the user's ssh key with this fingerprint. removing a key they don't
+// hold writes nothing.
+pub fn removeUserKey(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    users_dir: []const u8,
+    admin_repo: *rp.Repo(.xit, admin_repo_opts),
+    user_id: *const [event_id_size]u8,
+    fingerprint: *const [User.fingerprint_len]u8,
+) !void {
+    try writeUserKeys(io, allocator, users_dir, admin_repo, user_id, fingerprint, null);
+}
+
+// rewrite the user's ssh keys with `added` appended, or without the key with
+// `fingerprint` when nothing is added
+fn writeUserKeys(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    users_dir: []const u8,
+    admin_repo: *rp.Repo(.xit, admin_repo_opts),
+    user_id: *const [event_id_size]u8,
+    fingerprint: *const [User.fingerprint_len]u8,
+    added: ?[]const u8,
+) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const moment = try currentMoment(admin_repo_opts, admin_repo);
@@ -2291,21 +2313,18 @@ pub fn changeUserKey(
     var lines = std.mem.splitScalar(u8, user.event.ssh_keys, '\n');
     while (lines.next()) |line| {
         const line_fingerprint = User.fingerprintOfKey(line) orelse continue;
-        if (std.mem.eql(u8, &line_fingerprint, &fingerprint)) {
+        if (std.mem.eql(u8, &line_fingerprint, fingerprint)) {
             held = true;
-            if (action == .remove) continue;
+            if (added == null) continue;
         }
         if (keys.items.len > 0) try keys.append(arena.allocator(), '\n');
         try keys.appendSlice(arena.allocator(), line);
     }
-    switch (action) {
-        .add => {
-            if (held) return error.KeyAdded;
-            if (keys.items.len > 0) try keys.append(arena.allocator(), '\n');
-            try keys.appendSlice(arena.allocator(), key);
-        },
-        .remove => if (!held) return,
-    }
+    if (added) |key| {
+        if (held) return error.KeyAdded;
+        if (keys.items.len > 0) try keys.append(arena.allocator(), '\n');
+        try keys.appendSlice(arena.allocator(), key);
+    } else if (!held) return;
 
     var event = user.event;
     event.ssh_keys = keys.items;

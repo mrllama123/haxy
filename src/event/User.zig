@@ -38,6 +38,8 @@ pub const name_index_key = "name->user-id";
 // resolves a commit's author email to its user at read time
 pub const email_to_user_id_key = "email->user-id";
 
+pub const fingerprint_len = ssh.fingerprint_len;
+
 // the users holding each ssh key. a set, since two users may register one key.
 pub const fingerprint_to_user_id_set_key = "ssh-fingerprint->user-id-set";
 

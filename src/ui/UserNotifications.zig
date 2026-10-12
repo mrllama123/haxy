@@ -41,7 +41,7 @@ pub fn init(arena: *std.heap.ArenaAllocator, session: *ui.Session, tab: ui.Routa
     // local mode has no users
     if (session.data.host_kind != .server) return result;
     const user_id = session.userId() orelse return result;
-    result.ssh_keys = try ui.UserKeys.init(arena, session, &user_id);
+    result.ssh_keys = try ui.UserKeys.init(arena, session, &user_id, tab);
     const io = session.io orelse return error.NoMoment;
     const users_dir = session.users_dir orelse return error.NoMoment;
     const gpa = arena.child_allocator;
