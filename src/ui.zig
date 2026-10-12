@@ -35,6 +35,7 @@ pub const NotFound = @import("./ui/NotFound.zig");
 pub const NewRepo = @import("./ui/NewRepo.zig");
 pub const NewUser = @import("./ui/NewUser.zig");
 pub const UserSettings = @import("./ui/UserSettings.zig");
+pub const UserKeys = @import("./ui/UserKeys.zig");
 pub const UserNotifications = @import("./ui/UserNotifications.zig");
 pub const UserLogin = @import("./ui/UserLogin.zig");
 pub const widget = @import("./ui/widget.zig");
@@ -215,7 +216,7 @@ pub const RoutablePage = union(enum) {
 
     pub const EventsView = enum { active, removed };
 
-    pub const UserView = enum { notifications, settings };
+    pub const UserView = enum { notifications, settings, keys };
 
     // the user tab's sub tab and the notifications window it shows
     pub const UserTab = struct {
@@ -1299,6 +1300,7 @@ pub const RoutablePage = union(enum) {
     fn userTabUrl(arena: *std.heap.ArenaAllocator, prefix: []const u8, tab: UserTab) ![]const u8 {
         return switch (tab.view) {
             .settings => try arena.allocator().print("{s}/user/settings", .{prefix}),
+            .keys => try arena.allocator().print("{s}/user/keys", .{prefix}),
             .notifications => if (tab.start == 0)
                 try arena.allocator().print("{s}/user/notifications", .{prefix})
             else
@@ -1503,12 +1505,12 @@ pub const RoutablePage = union(enum) {
     }
 
     // the tail after a page's "user": none or "notifications" with an optional
-    // "start:<n>", "settings", or "new"
+    // "start:<n>", "settings", "keys", or "new"
     fn userTail(segments: *std.mem.SplitIterator(u8, .scalar)) ?union(enum) { new, tab: UserTab } {
         const word = segments.next() orelse return .{ .tab = .{} };
         if (std.mem.eql(u8, word, "new")) return if (segments.next() == null) .new else null;
         return switch (std.meta.stringToEnum(UserView, word) orelse return null) {
-            .settings => if (segments.next() == null) .{ .tab = .{ .view = .settings } } else null,
+            inline .settings, .keys => |view| if (segments.next() == null) .{ .tab = .{ .view = view } } else null,
             .notifications => .{ .tab = .{ .start = listStart(segments) orelse return null } },
         };
     }
@@ -2320,6 +2322,21 @@ pub const Session = struct {
 
         pub const AssignmentFailure = enum { not_found, not_an_email, already_assigned };
 
+        pub const KeyFailure = enum {
+            invalid,
+            unsupported,
+            already_added,
+
+            pub fn fromError(err: anyerror) ?KeyFailure {
+                return switch (err) {
+                    error.InvalidKey => .invalid,
+                    error.UnsupportedKey => .unsupported,
+                    error.KeyAdded => .already_added,
+                    else => null,
+                };
+            }
+        };
+
         pub const UserFailure = enum {
             required_name,
             invalid_name,
@@ -2361,6 +2378,10 @@ pub const Session = struct {
             failure: UserFailure,
             // passwords are never retained
             fields: struct { email: []const u8 },
+        },
+        user_keys: struct {
+            failure: KeyFailure,
+            key: []const u8,
         },
         repo: struct {
             failure: RepoFailure,

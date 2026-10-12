@@ -2259,6 +2259,64 @@ pub fn updateUser(
     }});
 }
 
+pub const KeyAction = enum { add, remove };
+
+// add an authorized_keys line to the user's ssh keys, or remove the lines
+// holding the same key. removing a key they don't hold writes nothing.
+pub fn changeUserKey(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    users_dir: []const u8,
+    admin_repo: *rp.Repo(.xit, admin_repo_opts),
+    user_id: *const [event_id_size]u8,
+    action: KeyAction,
+    key_text: []const u8,
+) !void {
+    const key = std.mem.trim(u8, key_text, " \t\r");
+    // the keys are stored one per line
+    if (std.mem.indexOfScalar(u8, key, '\n') != null) return error.InvalidKey;
+    const fingerprint = User.fingerprintOfKey(key) orelse return error.InvalidKey;
+    // the key types the ssh server verifies
+    const key_type = std.mem.sliceTo(key, ' ');
+    if (action == .add and !std.mem.eql(u8, key_type, "ssh-ed25519") and !std.mem.eql(u8, key_type, "ssh-rsa")) return error.UnsupportedKey;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const moment = try currentMoment(admin_repo_opts, admin_repo);
+    const user = (try User.readById(AdminDB, admin_repo_opts.hash, moment, &arena, user_id)) orelse return error.NotFound;
+    if (user.removed) return error.NotFound;
+
+    var keys: std.ArrayList(u8) = .empty;
+    var held = false;
+    var lines = std.mem.splitScalar(u8, user.event.ssh_keys, '\n');
+    while (lines.next()) |line| {
+        const line_fingerprint = User.fingerprintOfKey(line) orelse continue;
+        if (std.mem.eql(u8, &line_fingerprint, &fingerprint)) {
+            held = true;
+            if (action == .remove) continue;
+        }
+        if (keys.items.len > 0) try keys.append(arena.allocator(), '\n');
+        try keys.appendSlice(arena.allocator(), line);
+    }
+    switch (action) {
+        .add => {
+            if (held) return error.KeyAdded;
+            if (keys.items.len > 0) try keys.append(arena.allocator(), '\n');
+            try keys.appendSlice(arena.allocator(), key);
+        },
+        .remove => if (!held) return,
+    }
+
+    var event = user.event;
+    event.ssh_keys = keys.items;
+    try consume(.{ .server = .{ .users_dir = users_dir } }, .admin, .xit, admin_repo_opts, io, allocator, admin_repo, events_ref, &[_]EventWithId{.{
+        .id = std.fmt.bytesToHex(user_id.*, .lower),
+        .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
+        .author = .{ .name = event.name, .email = event.email },
+        .event = .{ .user = event },
+    }});
+}
+
 // consume a new repo's event into its owner's user repo and mark it active
 fn writeRepoEvent(
     io: std.Io,

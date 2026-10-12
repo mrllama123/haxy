@@ -159,7 +159,7 @@ fn handleRequest(
         switch (host) {
             .server => |server| {
                 // "repo/new" and "user/new" come before "new", which would claim them
-                const PostRoute = enum { login, logout, @"repo/new", @"user/new", user, settings, grant, revoke, promote, demote, new, edit, remove, open, close, resolve, publish, merge, squash, attach, assign, unassign, subscribe, mute, undo, clear };
+                const PostRoute = enum { login, logout, @"repo/new", @"user/new", user, addkey, removekey, settings, grant, revoke, promote, demote, new, edit, remove, open, close, resolve, publish, merge, squash, attach, assign, unassign, subscribe, mute, undo, clear };
                 inline for (@typeInfo(PostRoute).@"enum".field_names) |name| {
                     const suffix = "/" ++ name;
                     if (std.mem.endsWith(u8, path, suffix)) {
@@ -170,6 +170,8 @@ fn handleRequest(
                             .@"repo/new" => handleRepoNew(io, request, allocator, path, server.admin_repo_path, server.users_dir, server.session_store),
                             .@"user/new" => handleUserNew(io, request, allocator, path, server.admin_repo_path, server.users_dir, server.session_store),
                             .user => handleUserSettings(io, request, allocator, base, server.admin_repo_path, server.users_dir, server.session_store),
+                            .addkey => handleUserKey(io, request, allocator, base, server.admin_repo_path, server.users_dir, server.session_store, .add),
+                            .removekey => handleUserKey(io, request, allocator, base, server.admin_repo_path, server.users_dir, server.session_store, .remove),
                             .settings => handleRepoSettings(io, request, allocator, path, host),
                             .grant => handleRoles(io, request, allocator, base, host, .grant),
                             .revoke => handleRoles(io, request, allocator, base, host, .revoke),
@@ -885,6 +887,43 @@ fn handleUserSettings(
             else => {
                 const failure = ui.Session.FormFeedback.UserFailure.fromError(err) orelse return err;
                 return respondFormFailure(request, allocator, session_store, form_location, .{ .user_settings = .{ .failure = failure, .fields = .{ .email = email } } });
+            },
+        };
+    }
+
+    try request.respond("", .{
+        .status = .see_other,
+        .extra_headers = &.{.{ .name = "location", .value = form_location }},
+    });
+}
+
+// add or remove one of the logged-in user's ssh keys, then return to the ssh
+// keys tab that posted the form, which a failure also goes back to.
+fn handleUserKey(
+    io: std.Io,
+    request: *std.http.Server.Request,
+    allocator: std.mem.Allocator,
+    form_location: []const u8,
+    admin_repo_path: []const u8,
+    users_dir: []const u8,
+    session_store: SessionStore,
+    action: evt.KeyAction,
+) !void {
+    const user_id = requestUserId(request, session_store) orelse return respondLoginRequired(request);
+
+    const body = try readFormBody(request, allocator);
+    defer allocator.free(body);
+    const key = (try parseFormField(allocator, body, "key")) orelse try allocator.dupe(u8, "");
+    defer allocator.free(key);
+
+    {
+        var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = admin_repo_path });
+        defer admin_repo.deinit(io, allocator);
+        evt.changeUserKey(io, allocator, users_dir, &admin_repo, &user_id, action, key) catch |err| switch (err) {
+            error.NotFound => return respondLoginRequired(request),
+            else => {
+                const failure = ui.Session.FormFeedback.KeyFailure.fromError(err) orelse return err;
+                return respondFormFailure(request, allocator, session_store, form_location, .{ .user_keys = .{ .failure = failure, .key = key } });
             },
         };
     }

@@ -142,7 +142,7 @@ pub fn consume(
 
 // the SHA256 fingerprint of one authorized_keys line, or null if the line is
 // blank or not a parseable "<type> <base64> [comment]" entry
-fn fingerprintOfKey(line: []const u8) ?[ssh.fingerprint_len]u8 {
+pub fn fingerprintOfKey(line: []const u8) ?[ssh.fingerprint_len]u8 {
     var it = std.mem.tokenizeAny(u8, line, " \t\r");
     _ = it.next() orelse return null; // key type
     const blob_b64 = it.next() orelse return null;
