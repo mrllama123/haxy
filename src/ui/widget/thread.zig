@@ -942,7 +942,7 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                     const conflicted = supports_conflicts and entryConflicted(entry);
                     if (conflicted) {
                         const route = resolveRoute(self.data.identity, entry.id, "") orelse return error.RouteTooLong;
-                        try addToolButton(allocator, row, "resolve conflict", "", try pa.print("a:{s}", .{try route.toUrl(self.session.page_arena)}));
+                        try addToolButton(allocator, row, "resolve", " conflicts ", try pa.print("a:{s}", .{try route.toUrl(self.session.page_arena)}));
                     } else if (has_status) {
                         if (statusChange(entryStatus(entry))) |change| {
                             const route = ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, entry.id, 0) orelse return error.RouteTooLong;
