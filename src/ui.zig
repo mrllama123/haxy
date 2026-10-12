@@ -2320,6 +2320,8 @@ pub const Session = struct {
     // port the web UI is served on, for the TUI/SSH footer's "http://localhost:<port>..."
     // url. null on the web itself (no footer there).
     web_port: ?u16 = null,
+    // the authorized_keys line of the key an ssh session connected with
+    ssh_key: ?[]const u8 = null,
     // a host operation requested by a widget
     host_request: ?HostRequest = null,
     quit_requested: bool = false,
@@ -2564,6 +2566,55 @@ pub const Session = struct {
         self.data.user_id = null;
         self.data.user_name = null;
         self.data.user_email = null;
+    }
+
+    // log in as the account the session's ssh key last logged into with a
+    // password, while that account still holds the key
+    pub fn logInWithSshKey(self: *Self) !void {
+        const key = self.ssh_key orelse return;
+        const admin_repo = self.admin_repo orelse return;
+        const moment = self.haxy_moment orelse return;
+        const fingerprint = evt.User.fingerprintOfKey(key) orelse return;
+        const user_id = (try evt.readLoginKeyUser(try admin_repo.core.latestMoment(), &fingerprint)) orelse return;
+        if (!try evt.User.holdsKey(evt.AdminDB, evt.admin_repo_opts.hash, moment, self.arena, &user_id, &fingerprint)) return;
+        self.data.user_id = try self.arena.allocator().dupe(u8, &user_id);
+        try self.loadUser();
+    }
+
+    // add the session's ssh key to the user who just logged in with a
+    // password, which proves they hold it, and let it log them in from now on
+    pub fn rememberSshKey(self: *Self) !void {
+        if (builtin.target.cpu.arch == .wasm32) return;
+        const key = self.ssh_key orelse return;
+        const io = self.io orelse return;
+        const users_dir = self.users_dir orelse return;
+        const admin_repo = self.admin_repo orelse return;
+        const user_id = self.userId() orelse return;
+        const fingerprint = evt.User.fingerprintOfKey(key) orelse return;
+        const allocator = self.arena.child_allocator;
+
+        const day = (std.time.epoch.EpochSeconds{ .secs = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()) }).getEpochDay().calculateYearDay();
+        const month = day.calculateMonthDay();
+        const line = try std.fmt.allocPrint(allocator, "{s} added {d:0>4}-{d:0>2}-{d:0>2} via login", .{ key, day.year, month.month.numeric(), month.day_index + 1 });
+        defer allocator.free(line);
+        evt.addUserKey(io, allocator, users_dir, admin_repo, &user_id, line) catch |err| switch (err) {
+            // it's already there, or there's no room for it
+            error.KeyAdded, error.TooManyKeys => {},
+            else => return err,
+        };
+        try evt.setLoginKey(io, admin_repo, &fingerprint, &user_id, .trust);
+        self.haxy_moment = try evt.currentMoment(evt.admin_repo_opts, admin_repo);
+    }
+
+    // stop the session's ssh key logging the user in, on a logout
+    pub fn forgetSshKey(self: *Self) !void {
+        if (builtin.target.cpu.arch == .wasm32) return;
+        const key = self.ssh_key orelse return;
+        const io = self.io orelse return;
+        const admin_repo = self.admin_repo orelse return;
+        const user_id = self.userId() orelse return;
+        const fingerprint = evt.User.fingerprintOfKey(key) orelse return;
+        try evt.setLoginKey(io, admin_repo, &fingerprint, &user_id, .forget);
     }
 
     pub fn userId(self: *const Self) ?[evt.event_id_size]u8 {

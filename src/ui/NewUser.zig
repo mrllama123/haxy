@@ -154,6 +154,7 @@ pub const View = struct {
 
         // log in as the new user, reading them from a moment that has them
         self.session.data.user_id = try self.session.arena.allocator().dupe(u8, &id);
+        try self.session.rememberSshKey();
         self.session.haxy_moment = try evt.currentMoment(evt.admin_repo_opts, admin_repo);
         try self.session.loadUser();
 

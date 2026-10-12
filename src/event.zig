@@ -156,6 +156,65 @@ fn readActivityTime(moment: UserDB.HashMap(.read_only), repo_id: *const [event_i
     return try time_cursor.readUint();
 }
 
+// the account each ssh key last logged into with a password, which the key
+// logs into from then on. this instance's own state, so it lives outside the
+// events, in the admin repo.
+const login_key_to_user_id_key = "haxy/login-key->user-id";
+
+pub const LoginKeyChange = enum { trust, forget };
+
+// let the key with `fingerprint` log `user_id` in, or stop it doing so
+pub fn setLoginKey(
+    io: std.Io,
+    admin_repo: *rp.Repo(.xit, admin_repo_opts),
+    fingerprint: *const [User.fingerprint_len]u8,
+    user_id: *const [event_id_size]u8,
+    change: LoginKeyChange,
+) !void {
+    const hash_kind = admin_repo_opts.hash;
+    const Ctx = struct {
+        fingerprint: *const [User.fingerprint_len]u8,
+        user_id: *const [event_id_size]u8,
+        change: LoginKeyChange,
+
+        pub fn run(ctx: @This(), cursor: *AdminDB.Cursor(.read_write)) !void {
+            const moment = try AdminDB.HashMap(.read_write).init(cursor.*);
+            const keys = try AdminDB.HashMap(.read_write).init(try moment.putCursor(hash.hashInt(hash_kind, login_key_to_user_id_key)));
+            const key = hash.hashInt(hash_kind, ctx.fingerprint);
+            switch (ctx.change) {
+                .trust => try keys.put(key, .{ .bytes = ctx.user_id }),
+                // a later login to another account keeps its trust
+                .forget => {
+                    const trusted_cursor = try keys.getCursor(key) orelse return error.CancelTransaction;
+                    var trusted_id: [event_id_size]u8 = undefined;
+                    _ = try trusted_cursor.readBytes(&trusted_id);
+                    if (!std.mem.eql(u8, &trusted_id, ctx.user_id)) return error.CancelTransaction;
+                    _ = try keys.remove(key);
+                },
+            }
+        }
+    };
+
+    try admin_repo.core.db_file.lock(io, .exclusive);
+    defer admin_repo.core.db_file.unlock(io);
+
+    const history = try AdminDB.ArrayList(.read_write).init(admin_repo.core.db.rootCursor());
+    history.appendContext(.{ .slot = try history.getSlot(-1) }, Ctx{ .fingerprint = fingerprint, .user_id = user_id, .change = change }) catch |err| switch (err) {
+        error.CancelTransaction => {},
+        else => |e| return e,
+    };
+}
+
+// the account the key with `fingerprint` logs into, from the admin repo's moment
+pub fn readLoginKeyUser(moment: AdminDB.HashMap(.read_only), fingerprint: *const [User.fingerprint_len]u8) !?[event_id_size]u8 {
+    const keys_cursor = try moment.getCursor(hash.hashInt(admin_repo_opts.hash, login_key_to_user_id_key)) orelse return null;
+    const keys = try AdminDB.HashMap(.read_only).init(keys_cursor);
+    const user_id_cursor = try keys.getCursor(hash.hashInt(admin_repo_opts.hash, fingerprint)) orelse return null;
+    var user_id: [event_id_size]u8 = undefined;
+    _ = try user_id_cursor.readBytes(&user_id);
+    return user_id;
+}
+
 // open a user's repo, or null when it's missing
 pub fn openUserRepo(io: std.Io, allocator: std.mem.Allocator, users_dir: []const u8, user_id: *const [event_id_size]u8) !?rp.Repo(.xit, user_repo_opts) {
     const path = try userRepoPath(allocator, users_dir, user_id);

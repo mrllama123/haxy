@@ -216,6 +216,7 @@ pub const View = struct {
                 // dupe user_id into the arena so the session can hold a stable slice
                 const user_id_stable = try self.session.arena.allocator().dupe(u8, &user_id);
                 self.session.data.user_id = user_id_stable;
+                try self.session.rememberSshKey();
 
                 // adopt the user's name and persisted prefs
                 try self.session.loadUser();

@@ -389,6 +389,8 @@ pub const SessionCtx = struct {
     /// client logs as `Offering public key: ED25519 SHA256:…`. consumers
     /// can use it as a stable per-key identity.
     fingerprint: [fingerprint_len]u8,
+    /// the SSH wire-format blob of that pubkey
+    public_key: []const u8 = "",
     closed: bool = false,
     // what a SessionReader or SessionWriter actually hit. kept apart so a
     // cleanup write can't replace the cause of a failed read.
@@ -783,8 +785,9 @@ pub fn handleConnection(
 }
 
 fn authAndRunChannels(conn: *Conn, handler: anytype) !void {
-    const fingerprint = try runAuth(conn);
-    try runChannelLayer(conn, &fingerprint, handler);
+    const client_key = try runAuth(conn);
+    defer conn.allocator.free(client_key.blob);
+    try runChannelLayer(conn, &client_key, handler);
 }
 
 /// tell the peer why we're hanging up (RFC 4253 §11.1), best effort. protocol
@@ -1683,7 +1686,14 @@ pub fn formatFingerprint(pubkey_blob: []const u8) [fingerprint_len]u8 {
     return out;
 }
 
-fn runAuth(conn: *Conn) ![fingerprint_len]u8 {
+/// the pubkey a client authenticated with
+const ClientKey = struct {
+    fingerprint: [fingerprint_len]u8,
+    /// owned by the connection's allocator
+    blob: []const u8,
+};
+
+fn runAuth(conn: *Conn) !ClientKey {
     const allocator = conn.allocator;
 
     // step 1: service request for ssh-userauth → service accept
@@ -1776,7 +1786,7 @@ fn runAuth(conn: *Conn) ![fingerprint_len]u8 {
         }
 
         try conn.writePacket(&.{&[_]u8{SSH_MSG_USERAUTH_SUCCESS}});
-        return formatFingerprint(pubkey_blob);
+        return .{ .fingerprint = formatFingerprint(pubkey_blob), .blob = try allocator.dupe(u8, pubkey_blob) };
     }
 }
 
@@ -1927,7 +1937,7 @@ fn takePtySize(r: *std.Io.Reader) !PtySize {
 
 fn runChannelLayer(
     conn: *Conn,
-    fingerprint: *const [fingerprint_len]u8,
+    client_key: *const ClientKey,
     handler: anytype,
 ) !void {
     const allocator = conn.allocator;
@@ -1955,7 +1965,8 @@ fn runChannelLayer(
                     var sess = SessionCtx{
                         .conn = conn,
                         .channel = ch,
-                        .fingerprint = fingerprint.*,
+                        .fingerprint = client_key.fingerprint,
+                        .public_key = client_key.blob,
                     };
                     defer sess.deinit();
                     handler.handleSession(&sess, request) catch |session_err| {
@@ -2277,7 +2288,7 @@ test "channel close before shell or exec is acknowledged" {
         }
     };
     var handler = Handler{};
-    try runChannelLayer(&conn, &@as([fingerprint_len]u8, @splat(0)), &handler);
+    try runChannelLayer(&conn, &.{ .fingerprint = @splat(0), .blob = "" }, &handler);
     var output_reader = std.Io.Reader.fixed(writer.buffered());
     var receiver = Cipher.init(&key, 0);
     const confirmation = try receiver.readPacket(allocator, &output_reader);

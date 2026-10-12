@@ -239,6 +239,8 @@ fn runTui(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySiz
     ui_session.io = io;
     ui_session.users_dir = handler.server.users_dir;
     ui_session.dirty_repos = handler.server.dirty_repos;
+    ui_session.ssh_key = try authorizedKeyLine(session_arena.allocator(), sess.public_key);
+    try ui_session.logInWithSshKey();
 
     var nav = try ui.Nav.init(allocator, &ui_session);
     defer nav.deinit(allocator);
@@ -606,6 +608,18 @@ fn commitAuthor(
 ) !evt.CommitAuthor {
     const user = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, user_id)) orelse unreachable;
     return .{ .name = user.event.name, .email = user.event.email };
+}
+
+// the authorized_keys line of a pubkey blob: its type, then the blob in base64
+fn authorizedKeyLine(allocator: std.mem.Allocator, blob: []const u8) ![]const u8 {
+    var reader = std.Io.Reader.fixed(blob);
+    const key_type = try ssh.takeString(&reader, 64);
+    const encoder = std.base64.standard.Encoder;
+    const line = try allocator.alloc(u8, key_type.len + 1 + encoder.calcSize(blob.len));
+    @memcpy(line[0..key_type.len], key_type);
+    line[key_type.len] = ' ';
+    _ = encoder.encode(line[key_type.len + 1 ..], blob);
+    return line;
 }
 
 fn writeError(sess: *ssh.SessionCtx, comptime msg: []const u8) !void {

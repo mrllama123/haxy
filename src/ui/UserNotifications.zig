@@ -71,6 +71,7 @@ fn isEmpty(self: *const Self) bool {
 
 // leave the user tab for the page it belongs to, where the web's logout redirect also lands
 pub fn logOut(session: *ui.Session) !void {
+    try session.forgetSshKey();
     session.logOut();
     try session.navigate(session.data.current_page.pageRoot());
 }
