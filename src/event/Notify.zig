@@ -35,7 +35,7 @@ pub const all_id_set_key = "notify-id-set";
 // the id of the one record a user can hold on a thread
 pub fn idOf(repo_id: *const [evt.event_id_size]u8, thread_id: *const [evt.event_id_size]u8) [evt.event_id_size]u8 {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    // the kind name keeps the id apart from the notif id the same pair hashes to
+    // the kind name keeps derived ids of different kinds apart
     hasher.update(@tagName(evt.EventKind.notify));
     hasher.update(repo_id);
     hasher.update(thread_id);

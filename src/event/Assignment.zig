@@ -34,6 +34,8 @@ pub const email_max_len = 254;
 // the id of the one assignment an email can hold on a thread
 pub fn idOf(thread_id: *const [evt.event_id_size]u8, email: []const u8) [evt.event_id_size]u8 {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    // the kind name keeps derived ids of different kinds apart
+    hasher.update(@tagName(evt.EventKind.assign));
     hasher.update(thread_id);
     hasher.update(email);
     var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;

@@ -28,6 +28,8 @@ pub const target_to_grant_id_set_key = "target->grant-id-set";
 // the id of the one grant a user can hold on a target
 pub fn idOf(target_id: *const [evt.event_id_size]u8, user_id: *const [evt.event_id_size]u8) [evt.event_id_size]u8 {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    // the kind name keeps derived ids of different kinds apart
+    hasher.update(@tagName(evt.EventKind.grant));
     hasher.update(target_id);
     hasher.update(user_id);
     var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
