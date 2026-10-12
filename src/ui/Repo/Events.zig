@@ -342,14 +342,13 @@ fn readItem(
             item.view_url = try route.toUrl(arena);
         },
         .attach => {
-            const record = (try evt.readRecordSubset(evt.Attachment, struct { author_email: ?[]const u8, event: struct { parent_id: [evt.event_id_size * 2]u8 } }, DB, hash_kind, haxy_moment, arena, id)) orelse return null;
+            const record = (try evt.readRecordSubset(evt.Attachment, struct { author_email: ?[]const u8, event: struct { target_id: [evt.event_id_size * 2]u8 } }, DB, hash_kind, haxy_moment, arena, id)) orelse return null;
             item.author = try ui.Author.initFromEmail(admin_moment, arena, record.author_email);
             if (!include_view_url) return item;
-            var parent_id: [evt.event_id_size]u8 = undefined;
-            _ = std.fmt.hexToBytes(&parent_id, &record.event.parent_id) catch return error.InvalidEventId;
-            const parent_kind = (try evt.readEventKind(hash_kind, kind_map, &parent_id)) orelse return item;
-            if (repo_event.threadRole(parent_kind) == null) return item;
-            const route = ui.RoutablePage.repoThreadCommentsRoute(parent_kind, identity, &record.event.parent_id, 0) orelse return item;
+            const target_id = try evt.parseEventId(&record.event.target_id);
+            const target_kind = (try evt.readEventKind(hash_kind, kind_map, &target_id)) orelse return item;
+            if (repo_event.threadRole(target_kind) == null) return item;
+            const route = ui.RoutablePage.repoThreadCommentsRoute(target_kind, identity, &record.event.target_id, 0) orelse return item;
             item.view_url = try route.toUrl(arena);
         },
         .assign => {

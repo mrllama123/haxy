@@ -51,7 +51,7 @@ pub fn init(
 
     return .{
         .selected = selected,
-        .replies = try loadWindow(hash_kind, arena, admin_moment, haxy_moment, evt.Comment.parent_id_to_comment_id_set_key, selected_id, start, viewer),
+        .replies = try loadWindow(hash_kind, arena, admin_moment, haxy_moment, evt.Comment.parent_id_to_comment_id_set_key, &try evt.parseEventId(selected_id), start, viewer),
     };
 }
 
@@ -62,7 +62,7 @@ pub fn loadWindow(
     admin_moment: ?evt.AdminDB.HashMap(.read_only),
     haxy_moment: evt.EventDB(hash_kind).HashMap(.read_only),
     index_key: []const u8,
-    owner_id: []const u8,
+    owner_id: *const [evt.event_id_size]u8,
     start: usize,
     viewer: ?ui.Viewer,
 ) !Window {

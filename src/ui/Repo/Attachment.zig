@@ -11,18 +11,18 @@ pub const WithId = struct {
     name: []const u8,
 };
 
-// every attachment on a parent event, oldest first. removed ones are
+// every attachment on a target event, oldest first. removed ones are
 // left out.
 pub fn load(
     comptime hash_kind: hash.HashKind,
     arena: *std.heap.ArenaAllocator,
     haxy_moment: evt.EventDB(hash_kind).HashMap(.read_only),
-    parent_id: []const u8,
+    target_id: *const [evt.event_id_size]u8,
 ) ![]const WithId {
     const DB = evt.EventDB(hash_kind);
-    const index_cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, evt.Attachment.parent_id_to_attachment_id_set_key)) orelse return &.{};
+    const index_cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, evt.Attachment.target_id_to_attachment_id_set_key)) orelse return &.{};
     const index = try DB.HashMap(.read_only).init(index_cursor);
-    const set_cursor = try index.getCursor(hash.hashInt(hash_kind, parent_id)) orelse return &.{};
+    const set_cursor = try index.getCursor(hash.hashInt(hash_kind, target_id)) orelse return &.{};
     const set = try DB.SortedSet(.read_only).init(set_cursor);
 
     var attachments: std.ArrayList(WithId) = .empty;
@@ -46,7 +46,7 @@ pub fn appendRows(
     box: *wgt.Box(ui.Widget),
     session: *ui.Session,
     identity: []const u8,
-    parent_url: []const u8,
+    target_url: []const u8,
     attachments: []const WithId,
 ) !void {
     const pa = session.page_arena.allocator();
@@ -65,7 +65,7 @@ pub fn appendRows(
         tb.getFocus().kind = .{ .custom = try pa.print("{s}{s}", .{ ui.raw_link_prefix, try url(session.page_arena, identity, &entry.id) }) };
         try row.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
 
-        row.getFocus().kind = .{ .custom = try pa.print("form:{s}/attachment:{s}/remove", .{ parent_url, &entry.id }) };
+        row.getFocus().kind = .{ .custom = try pa.print("form:{s}/attachment:{s}/remove", .{ target_url, &entry.id }) };
         var remove = try wgt.TextBox.init(allocator, "✕", .{ .border = .single, .round_corners = true, .wrap_kind = .none });
         errdefer remove.deinit(allocator);
         remove.getFocus().mode = .all;

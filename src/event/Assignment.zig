@@ -101,7 +101,8 @@ pub fn consume(
     // the thread's set holds active assignments only, oldest first. the id
     // fixes the thread, so an assignment never moves between sets.
     const order_key = evt.orderKey(record.created_order, event_id);
-    const thread_assignments = try DB.SortedSet(.read_write).init(try by_thread.putCursor(hash.hashInt(hash_kind, &record.event.thread_id)));
+    const thread_id = try evt.parseEventId(&record.event.thread_id);
+    const thread_assignments = try DB.SortedSet(.read_write).init(try by_thread.putCursor(hash.hashInt(hash_kind, &thread_id)));
     if (record.removed) {
         _ = try thread_assignments.remove(&order_key);
     } else {
@@ -109,7 +110,6 @@ pub fn consume(
     }
 
     // only an issue is indexed by assignee
-    const thread_id = try evt.parseEventId(&record.event.thread_id);
     const issue = (try evt.readRecordSubset(evt.Issue, struct { created_order: u64, removed: bool }, DB, hash_kind, haxy_moment.readOnly(), arena, &thread_id)) orelse return;
     try indexIssue(DB, hash_kind, haxy_moment, record.event.email, &evt.orderKeyDesc(issue.created_order, &thread_id), !record.removed and !issue.removed);
 }
@@ -189,7 +189,7 @@ pub fn load(
     comptime hash_kind: hash.HashKind,
     arena: *std.heap.ArenaAllocator,
     haxy_moment: evt.EventDB(hash_kind).HashMap(.read_only),
-    thread_id: []const u8,
+    thread_id: *const [evt.event_id_size]u8,
 ) ![]const []const u8 {
     const DB = evt.EventDB(hash_kind);
     var emails: std.ArrayList([]const u8) = .empty;

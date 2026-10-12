@@ -430,8 +430,9 @@ fn loadEntry(
 ) !?Data.Entry {
     const DB = evt.EventDB(hash_kind);
     const aa = arena.allocator();
+    const id = order_key[@sizeOf(u64)..];
     const id_hex = keyIdHex(order_key);
-    const record_cursor = try records.getCursor(hash.hashInt(hash_kind, order_key[@sizeOf(u64)..])) orelse return null;
+    const record_cursor = try records.getCursor(hash.hashInt(hash_kind, id)) orelse return null;
     const record = try evt.read(Data.Event.Record, DB, hash_kind, arena, try DB.HashMap(.read_only).init(record_cursor));
     var entry: Data.Entry = .{
         .id = try aa.dupe(u8, &id_hex),
@@ -443,12 +444,12 @@ fn loadEntry(
             admin_moment,
             haxy_moment,
             evt.Comment.thread_id_to_comment_id_set_key,
-            &id_hex,
+            id,
             if (std.mem.eql(u8, &id_hex, selected_id)) comments_start else 0,
             viewer,
         ),
-        .attachments = try Attachment.load(hash_kind, arena, haxy_moment, &id_hex),
-        .assignees = try loadAssignees(hash_kind, arena, admin_moment, haxy_moment, &id_hex),
+        .attachments = try Attachment.load(hash_kind, arena, haxy_moment, id),
+        .assignees = try loadAssignees(hash_kind, arena, admin_moment, haxy_moment, id),
         .can_modify = if (viewer) |v| v.role.canModify(v.email, record.author_email) else false,
     };
     if (comptime @hasField(Data.Entry, "conflicted")) {
@@ -463,7 +464,7 @@ fn loadAssignees(
     arena: *std.heap.ArenaAllocator,
     admin_moment: ?evt.AdminDB.HashMap(.read_only),
     haxy_moment: evt.EventDB(hash_kind).HashMap(.read_only),
-    thread_id: []const u8,
+    thread_id: *const [evt.event_id_size]u8,
 ) ![]const ui.Assignee {
     const emails = try evt.Assignment.load(hash_kind, arena, haxy_moment, thread_id);
     const assignees = try arena.allocator().alloc(ui.Assignee, emails.len);

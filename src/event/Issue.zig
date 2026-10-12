@@ -162,8 +162,7 @@ pub fn consume(
     }
 
     // the assignee sets hold the issue while it exists, whatever its status
-    const id_hex = std.fmt.bytesToHex(event_id.*, .lower);
-    for (try evt.Assignment.load(hash_kind, arena, haxy_moment.readOnly(), &id_hex)) |email| {
+    for (try evt.Assignment.load(hash_kind, arena, haxy_moment.readOnly(), event_id)) |email| {
         try evt.Assignment.indexIssue(DB, hash_kind, haxy_moment, email, &order_key, !record_to_write.removed);
     }
 }

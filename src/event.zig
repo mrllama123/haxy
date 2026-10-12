@@ -1748,8 +1748,8 @@ pub fn threadHolds(
             return std.mem.eql(u8, &comment.event.thread_id, &thread_id_hex);
         },
         .attach => |id| {
-            const attachment = (try readRecordSubset(Attachment, struct { event: struct { parent_id: [event_id_size * 2]u8 } }, DB, repo_opts.hash, moment, &arena, id)) orelse return false;
-            return std.mem.eql(u8, &attachment.event.parent_id, &thread_id_hex);
+            const attachment = (try readRecordSubset(Attachment, struct { event: struct { target_id: [event_id_size * 2]u8 } }, DB, repo_opts.hash, moment, &arena, id)) orelse return false;
+            return std.mem.eql(u8, &attachment.event.target_id, &thread_id_hex);
         },
         // only an active assignment can be removed
         .assign => |id| {

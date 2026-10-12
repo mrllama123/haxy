@@ -63,7 +63,7 @@ pub fn consume(
     var record_to_write = record_maybe orelse try evt.removedRecord(Record, DB, hash_kind, haxy_moment.readOnly(), existing_record_maybe);
 
     const thread_id = try evt.parseEventId(&record_to_write.event.thread_id);
-    _ = try evt.parseEventId(&record_to_write.event.parent_id);
+    const parent_id = try evt.parseEventId(&record_to_write.event.parent_id);
 
     if (existing_record_maybe) |existing_record| {
         // updates preserve the original creation order and author
@@ -90,11 +90,11 @@ pub fn consume(
 
     // removed comments stay in the thread so their replies remain connected
     const thread_order_key = evt.orderKey(record_to_write.created_order, event_id);
-    const thread_comments_cursor = try thread_id_to_comment_id_set.putCursor(hash.hashInt(hash_kind, &record_to_write.event.thread_id));
+    const thread_comments_cursor = try thread_id_to_comment_id_set.putCursor(hash.hashInt(hash_kind, &thread_id));
     const thread_comments = try DB.SortedSet(.read_write).init(thread_comments_cursor);
     try thread_comments.put(&thread_order_key);
 
-    const replies_cursor = try parent_id_to_comment_id_set.putCursor(hash.hashInt(hash_kind, &record_to_write.event.parent_id));
+    const replies_cursor = try parent_id_to_comment_id_set.putCursor(hash.hashInt(hash_kind, &parent_id));
     const replies = try DB.SortedSet(.read_write).init(replies_cursor);
     try replies.put(&thread_order_key);
 }

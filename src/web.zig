@@ -1343,8 +1343,8 @@ fn respondAttachmentNotFound(request: *std.http.Server.Request) !void {
     });
 }
 
-fn respondAttachmentParentNotFound(request: *std.http.Server.Request) !void {
-    try request.respond("attachment parent not found", .{
+fn respondAttachmentTargetNotFound(request: *std.http.Server.Request) !void {
+    try request.respond("attachment target not found", .{
         .status = .not_found,
         .keep_alive = false,
         .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
@@ -1354,7 +1354,7 @@ fn respondAttachmentParentNotFound(request: *std.http.Server.Request) !void {
 // the upload declares its file's name here, since the body is the file itself
 const attachment_name_header = "x-attachment-name";
 
-const AttachParentParts = struct {
+const AttachTargetParts = struct {
     repo_base: []const u8,
     kind: evt.EventKind,
     id_bytes: [evt.event_id_size]u8,
@@ -1362,7 +1362,7 @@ const AttachParentParts = struct {
 
 // what an attachment hangs off: the `<kind>:<id>` segment the form's page ends
 // with, whatever kind that is
-fn attachParentParts(base: []const u8) ?AttachParentParts {
+fn attachTargetParts(base: []const u8) ?AttachTargetParts {
     const segment_at = std.mem.lastIndexOfScalar(u8, base, '/') orelse return null;
     const segment = base[segment_at + 1 ..];
     const colon_at = std.mem.lastIndexOfScalar(u8, segment, ':') orelse return null;
@@ -1381,14 +1381,14 @@ fn handleAttach(
     base: []const u8,
     host: Host,
 ) !void {
-    const parts = attachParentParts(base) orelse return respondAttachmentParentNotFound(request);
+    const parts = attachTargetParts(base) orelse return respondAttachmentTargetNotFound(request);
 
     var author_arena = std.heap.ArenaAllocator.init(allocator);
     defer author_arena.deinit();
     const actor = (try authorizeWrite(io, allocator, &author_arena, request, host, parts.repo_base, .read, parts.kind)) orelse return;
     const author = actor.author;
     // an attachment changes the event it hangs off
-    const request_repo = (try requestRepoSource(io, allocator, host, parts.repo_base)) orelse return respondAttachmentParentNotFound(request);
+    const request_repo = (try requestRepoSource(io, allocator, host, parts.repo_base)) orelse return respondAttachmentTargetNotFound(request);
     defer request_repo.deinit(allocator);
     const source = request_repo.source;
     if (!try source.canModify(io, allocator, actor, parts.kind, &parts.id_bytes)) return respondForbidden(request);
@@ -1401,7 +1401,7 @@ fn handleAttach(
     if (size == 0) return respondUploadError(request, .bad_request, "attachment is empty");
     if (size > evt.Attachment.max_size) return respondUploadError(request, .payload_too_large, "attachment is too large");
 
-    const parent_id_hex = std.fmt.bytesToHex(parts.id_bytes, .lower);
+    const target_id_hex = std.fmt.bytesToHex(parts.id_bytes, .lower);
 
     var body_buf: [4096]u8 = undefined;
     const blob: evt.Blob = .{ .name = name, .size = size, .reader = try request.readerExpectContinue(&body_buf) };
@@ -1411,8 +1411,8 @@ fn handleAttach(
             var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, source.localInitOpts());
             defer any_repo.deinit(io, allocator);
             switch (any_repo) {
-                inline else => |*repo| _ = evt.Attachment.create(host.event(), repo_kind, repo.self_repo_opts, io, allocator, repo, parts.kind, &parent_id_hex, blob, author) catch |err| switch (err) {
-                    error.ParentNotFound => return respondAttachmentParentNotFound(request),
+                inline else => |*repo| _ = evt.Attachment.create(host.event(), repo_kind, repo.self_repo_opts, io, allocator, repo, parts.kind, &target_id_hex, blob, author) catch |err| switch (err) {
+                    error.TargetNotFound => return respondAttachmentTargetNotFound(request),
                     else => return err,
                 },
             }
@@ -1705,12 +1705,12 @@ const RemoveParts = struct {
 // split a remove url into the repo and event it names
 fn removeParts(host: Host, base: []const u8) ?RemoveParts {
     if (attachmentRequest(base)) |attachment| {
-        const parent = attachParentParts(attachment.repo_base) orelse return null;
+        const target = attachTargetParts(attachment.repo_base) orelse return null;
         return .{
-            .repo_base = parent.repo_base,
+            .repo_base = target.repo_base,
             .kind = .attach,
-            .thread_kind = parent.kind,
-            .thread_id = parent.id_bytes,
+            .thread_kind = target.kind,
+            .thread_id = target.id_bytes,
             .id = attachment.id,
         };
     }
