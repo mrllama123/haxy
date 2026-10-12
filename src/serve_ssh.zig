@@ -486,7 +486,7 @@ fn runForkSession(
     const user = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &admin_arena, &forker_id)) orelse
         return writeError(sess, "invalid patch draft");
     if (user.removed) return writeError(sess, "invalid patch draft");
-    if (service == .receive_pack and !isKeyInAuthorizedKeys(user.event.ssh_keys, &sess.fingerprint))
+    if (service == .receive_pack and !try evt.User.holdsKey(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &admin_arena, &forker_id, &sess.fingerprint))
         return writeError(sess, "unauthorized: this SSH key is not registered to the patch author");
 
     const target_owner_id = try evt.parseEventId(&fork_record.event.repo_user_id);
@@ -575,11 +575,8 @@ fn authorizeRepoKey(
     const repo = (try evt.readRepoByOwnerAndName(io, allocator, arena, moment, users_dir, owner_name, repo_name, null)) orelse {
         if (service == .upload_pack) return .not_found;
         const owner_id = (try evt.User.readIdByName(evt.AdminDB, evt.admin_repo_opts.hash, moment, owner_name)) orelse return .not_found;
-        const owner = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, &owner_id)) orelse unreachable;
-        return if (isKeyInAuthorizedKeys(owner.event.ssh_keys, fingerprint))
-            .{ .create = .{ .owner_id = owner_id, .owner = .{ .name = owner.event.name, .email = owner.event.email } } }
-        else
-            .denied;
+        if (!try evt.User.holdsKey(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, &owner_id, fingerprint)) return .denied;
+        return .{ .create = .{ .owner_id = owner_id, .owner = try commitAuthor(moment, arena, &owner_id) } };
     };
 
     const min_role: evt.Repo.Role = switch (service) {
@@ -591,54 +588,24 @@ fn authorizeRepoKey(
         if (base.atLeast(min_role)) return .{ .allowed = null };
     }
 
-    // the creator owns the repo
+    // a key can be shared, so a holder whose role falls short doesn't end the search
     const owner_id = try evt.parseEventId(&repo.repo.event.user_id);
-    if (try authorWithKey(moment, arena, &owner_id, fingerprint)) |author| return .{ .allowed = author };
-
-    // anyone else holding the key needs a grant with the role. a key can be
-    // shared, so a grant that falls short doesn't end the search.
-    for (try evt.readRepoGrants(io, allocator, arena, users_dir, &owner_id, &repo.event_id)) |grant| {
-        if (!grant.role.atLeast(min_role)) continue;
-        if (try authorWithKey(moment, arena, &try evt.parseEventId(&grant.user_id), fingerprint)) |author| return .{ .allowed = author };
+    for (try evt.User.readIdsByFingerprint(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, fingerprint)) |holder_id| {
+        const seen = (try evt.readRepoById(io, allocator, arena, users_dir, &owner_id, &repo.event_id, holder_id)) orelse return .not_found;
+        const role = seen.role orelse continue;
+        if (role.atLeast(min_role)) return .{ .allowed = try commitAuthor(moment, arena, &holder_id) };
     }
     return .denied;
 }
 
-// the user as a commit author, or null unless they hold the key
-fn authorWithKey(
+// an active user as a commit author
+fn commitAuthor(
     moment: evt.AdminDB.HashMap(.read_only),
     arena: *std.heap.ArenaAllocator,
-    user_id: []const u8,
-    fingerprint: *const [ssh.fingerprint_len]u8,
-) !?evt.CommitAuthor {
-    const user = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, user_id)) orelse return null;
-    if (user.removed or !isKeyInAuthorizedKeys(user.event.ssh_keys, fingerprint)) return null;
+    user_id: *const [evt.event_id_size]u8,
+) !evt.CommitAuthor {
+    const user = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, user_id)) orelse unreachable;
     return .{ .name = user.event.name, .email = user.event.email };
-}
-
-fn isKeyInAuthorizedKeys(ssh_keys: []const u8, fingerprint: *const [ssh.fingerprint_len]u8) bool {
-    var it = std.mem.splitScalar(u8, ssh_keys, '\n');
-    while (it.next()) |line| {
-        const fp = fingerprintOfAuthorizedKey(line) orelse continue;
-        if (std.mem.eql(u8, &fp, fingerprint)) return true;
-    }
-    return false;
-}
-
-// the SHA256 fingerprint of one authorized_keys line, or null if the line is
-// blank or not a parseable "<type> <base64> [comment]" entry
-fn fingerprintOfAuthorizedKey(line: []const u8) ?[ssh.fingerprint_len]u8 {
-    var it = std.mem.tokenizeAny(u8, line, " \t\r");
-    _ = it.next() orelse return null; // key type
-    const blob_b64 = it.next() orelse return null;
-
-    const decoder = std.base64.standard.Decoder;
-    const blob_len = decoder.calcSizeForSlice(blob_b64) catch return null;
-    var blob_buf: [4096]u8 = undefined;
-    if (blob_len > blob_buf.len) return null;
-    decoder.decode(blob_buf[0..blob_len], blob_b64) catch return null;
-
-    return ssh.formatFingerprint(blob_buf[0..blob_len]);
 }
 
 fn writeError(sess: *ssh.SessionCtx, comptime msg: []const u8) !void {

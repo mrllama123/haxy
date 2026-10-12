@@ -4,6 +4,7 @@ const xit = @import("xit");
 const rp = xit.repo;
 const hash = xit.hash;
 const bcrypt = std.crypto.pwhash.bcrypt;
+const ssh = @import("../serve_ssh_protocol.zig");
 
 name: []const u8,
 email: []const u8,
@@ -36,6 +37,9 @@ pub const name_index_key = "name->user-id";
 
 // resolves a commit's author email to its user at read time
 pub const email_to_user_id_key = "email->user-id";
+
+// the users holding each ssh key. a set, since two users may register one key.
+pub const fingerprint_to_user_id_set_key = "ssh-fingerprint->user-id-set";
 
 pub fn validateName(name: []const u8) !void {
     if (name.len == 0) return error.NameEmpty;
@@ -77,6 +81,9 @@ pub fn consume(
     const email_to_user_id_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, email_to_user_id_key));
     const email_to_user_id = try DB.HashMap(.read_write).init(email_to_user_id_cursor);
 
+    const fingerprint_to_user_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, fingerprint_to_user_id_set_key));
+    const fingerprint_to_user_id_set = try DB.HashMap(.read_write).init(fingerprint_to_user_id_set_cursor);
+
     var existing_record_maybe: ?Record = null;
     const existing_cursor_maybe = try event_id_to_user.getCursor(user_key);
     if (existing_cursor_maybe) |existing_cursor| {
@@ -96,6 +103,13 @@ pub fn consume(
         if (!existing_record.removed) {
             _ = try name_to_user_id.remove(existing_record.event.name);
             _ = try email_to_user_id.remove(hash.hashInt(hash_kind, existing_record.event.email));
+
+            var keys = std.mem.splitScalar(u8, existing_record.event.ssh_keys, '\n');
+            while (keys.next()) |line| {
+                const fingerprint = fingerprintOfKey(line) orelse continue;
+                const user_id_set = try DB.SortedSet(.read_write).init(try fingerprint_to_user_id_set.putCursor(hash.hashInt(hash_kind, &fingerprint)));
+                _ = try user_id_set.remove(event_id);
+            }
         }
     }
 
@@ -116,7 +130,30 @@ pub fn consume(
     if (!record_to_write.removed) {
         try name_to_user_id.put(record_to_write.event.name, .{ .bytes = event_id });
         try email_to_user_id.put(hash.hashInt(hash_kind, record_to_write.event.email), .{ .bytes = event_id });
+
+        var keys = std.mem.splitScalar(u8, record_to_write.event.ssh_keys, '\n');
+        while (keys.next()) |line| {
+            const fingerprint = fingerprintOfKey(line) orelse continue;
+            const user_id_set = try DB.SortedSet(.read_write).init(try fingerprint_to_user_id_set.putCursor(hash.hashInt(hash_kind, &fingerprint)));
+            try user_id_set.put(event_id);
+        }
     }
+}
+
+// the SHA256 fingerprint of one authorized_keys line, or null if the line is
+// blank or not a parseable "<type> <base64> [comment]" entry
+fn fingerprintOfKey(line: []const u8) ?[ssh.fingerprint_len]u8 {
+    var it = std.mem.tokenizeAny(u8, line, " \t\r");
+    _ = it.next() orelse return null; // key type
+    const blob_b64 = it.next() orelse return null;
+
+    const decoder = std.base64.standard.Decoder;
+    const blob_len = decoder.calcSizeForSlice(blob_b64) catch return null;
+    var blob_buf: [4096]u8 = undefined;
+    if (blob_len > blob_buf.len) return null;
+    decoder.decode(blob_buf[0..blob_len], blob_b64) catch return null;
+
+    return ssh.formatFingerprint(blob_buf[0..blob_len]);
 }
 
 pub const password_hash_max_len = bcrypt.hash_length * 2;
@@ -225,6 +262,46 @@ pub fn readIdByName(
     var user_id: [evt.event_id_size]u8 = undefined;
     _ = try user_id_cursor.readBytes(&user_id);
     return user_id;
+}
+
+// the ids of the active users holding the ssh key with this fingerprint
+pub fn readIdsByFingerprint(
+    comptime DB: type,
+    comptime hash_kind: hash.HashKind,
+    haxy_moment: DB.HashMap(.read_only),
+    arena: *std.heap.ArenaAllocator,
+    fingerprint: *const [ssh.fingerprint_len]u8,
+) ![]const [evt.event_id_size]u8 {
+    var user_ids: std.ArrayList([evt.event_id_size]u8) = .empty;
+    const index_cursor = (try haxy_moment.getCursor(hash.hashInt(hash_kind, fingerprint_to_user_id_set_key))) orelse return user_ids.items;
+    const index = try DB.HashMap(.read_only).init(index_cursor);
+    const user_id_set_cursor = (try index.getCursor(hash.hashInt(hash_kind, fingerprint))) orelse return user_ids.items;
+    const user_id_set = try DB.SortedSet(.read_only).init(user_id_set_cursor);
+
+    var iter = try user_id_set.iterator();
+    while (try iter.next()) |kv_pair_cursor| {
+        var cursor = kv_pair_cursor;
+        const kv_pair = try cursor.readKeyValuePair();
+        var user_id: [evt.event_id_size]u8 = undefined;
+        _ = try kv_pair.key_cursor.readBytes(&user_id);
+        try user_ids.append(arena.allocator(), user_id);
+    }
+    return user_ids.items;
+}
+
+// whether the user holds the ssh key with this fingerprint
+pub fn holdsKey(
+    comptime DB: type,
+    comptime hash_kind: hash.HashKind,
+    haxy_moment: DB.HashMap(.read_only),
+    arena: *std.heap.ArenaAllocator,
+    user_id: *const [evt.event_id_size]u8,
+    fingerprint: *const [ssh.fingerprint_len]u8,
+) !bool {
+    for (try readIdsByFingerprint(DB, hash_kind, haxy_moment, arena, fingerprint)) |holder_id| {
+        if (std.mem.eql(u8, &holder_id, user_id)) return true;
+    }
+    return false;
 }
 
 // a user's record map via the event-id->user index
