@@ -414,7 +414,7 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, exec: ss
                 var sideband = progress.Sideband{ .writer = &writer.interface, .sess = sess };
                 try repo.uploadPack(io, allocator, &reader.interface, &writer.interface, .{ .protocol_version = protocol_version }, &sideband);
             },
-            .push => |pusher| try push.receivePackAndConsume(repo.self_repo_opts, io, allocator, repo, &reader.interface, &writer.interface, .{ .protocol_version = protocol_version, .protected_branches = pusher.protected_branches }, pusher.author, handler.server, handler.err, sess),
+            .push => |pusher| try push.receivePackAndConsume(repo.self_repo_opts, io, allocator, repo, &reader.interface, &writer.interface, .{ .protocol_version = protocol_version, .protected_branches = pusher.protected_branches, .locked_branches = pusher.locked_branches }, pusher.author, handler.server, handler.err, sess),
         },
     }
 }
@@ -559,6 +559,7 @@ const Allowed = union(enum) {
 const Pusher = struct {
     author: evt.CommitAuthor,
     protected_branches: []const []const u8,
+    locked_branches: []const []const u8,
 };
 
 // the owner of a repo a push may create
@@ -600,21 +601,32 @@ fn authorizeRepoKey(
     // any key may fetch a public repo; a push always needs a key holder
     if (service == .upload_pack and repo.role != null) return .{ .allowed = .fetch };
 
-    // a key can be shared, so a holder whose role falls short doesn't end the search
+    // a key can be shared, so the push acts as the holder with the highest role
     const owner_id = try evt.parseEventId(&repo.repo.event.user_id);
+    var best: ?struct { id: [evt.event_id_size]u8, role: evt.Repo.Role } = null;
     for (try evt.User.readIdsByFingerprint(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, fingerprint)) |holder_id| {
         const seen = (try evt.readRepoById(io, allocator, arena, users_dir, &owner_id, &repo.event_id, holder_id)) orelse return .not_found;
         const role = seen.role orelse continue;
-        if (!role.atLeast(min_role)) continue;
-        return .{ .allowed = switch (service) {
-            .upload_pack => .fetch,
-            .receive_pack => .{ .push = .{
-                .author = try commitAuthor(moment, arena, &holder_id),
-                .protected_branches = try repo.repo.event.protectedBranchNames(arena.allocator()),
-            } },
-        } };
+        if (best) |held| if (held.role.atLeast(role)) continue;
+        best = .{ .id = holder_id, .role = role };
     }
-    return .denied;
+    const holder = best orelse return .denied;
+    if (!holder.role.atLeast(min_role)) return .denied;
+    return .{
+        .allowed = switch (service) {
+            .upload_pack => .fetch,
+            .receive_pack => blk: {
+                const names = try repo.repo.event.protectedBranchNames(arena.allocator());
+                // members change protected branches only by merging a patch
+                const owner = holder.role == .owner;
+                break :blk .{ .push = .{
+                    .author = try commitAuthor(moment, arena, &holder.id),
+                    .protected_branches = if (owner) names else &.{},
+                    .locked_branches = if (owner) &.{} else names,
+                } };
+            },
+        },
+    };
 }
 
 // an active user as a commit author

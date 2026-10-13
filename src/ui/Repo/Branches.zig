@@ -74,7 +74,8 @@ pub const View = struct {
     data: *const Self,
     session: *ui.Session,
 
-    const add_index = 0;
+    const about_index = 0;
+    const add_index = 1;
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
         const aa = session.page_arena.allocator();
@@ -84,24 +85,27 @@ pub const View = struct {
         const url = try route.toUrl(session.page_arena);
 
         {
-            // the gap leaves a blank line between the text and the input
-            var add = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .vert, .gap = 1 });
+            var about = try ui.widget.initAbout(allocator, &.{
+                .{ .text = "protected branches can't be deleted or force pushed.\n" },
+                .{ .text = "owners", .style = .{ .bold = true } },
+                .{ .text = " can push directly to them.\n" },
+                .{ .text = "members", .style = .{ .bold = true } },
+                .{ .text = " can only change them by merging a patch." },
+            });
+            errdefer about.deinit(allocator);
+            try box.children.put(allocator, about.getFocus().id, .{ .widget = .{ .box = about }, .rect = null, .min_size = null });
+        }
+        {
+            var add = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .horiz });
             errdefer add.deinit(allocator);
             add.getFocus().kind = .{ .custom = try aa.print("form:{s}/protect", .{url}) };
-            {
-                var about = try ui.widget.RichText.init(allocator, &.{
-                    .{ .text = "protected branches can't be deleted or force pushed." },
-                });
-                errdefer about.deinit(allocator);
-                try add.children.put(allocator, about.getFocus().id, .{ .widget = .{ .rich_text = about }, .rect = null, .min_size = null });
-            }
             var name = try wgt.TextInput.init(allocator, .{ .top_label = .{ .text = " add a protected branch " }, .name = "name", .visible_width = 30, .round_corners = true, .render_content = session.is_terminal });
             errdefer name.deinit(allocator);
             name.getFocus().mode = .all;
             if (session.formFeedback(.repo_branches)) |saved| try name.setContent(allocator, saved.name);
             add.getFocus().child_id = name.getFocus().id;
             try add.children.put(allocator, name.getFocus().id, .{ .widget = .{ .text_input = name }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
-            try box.children.put(allocator, add.getFocus().id, .{ .widget = .{ .box = add }, .rect = null, .min_size = .{ .width = null, .height = 5 } });
+            try box.children.put(allocator, add.getFocus().id, .{ .widget = .{ .box = add }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
         }
 
         // the branch rows follow the add row in the same box
@@ -131,7 +135,7 @@ pub const View = struct {
             try box.children.put(allocator, row_box.getFocus().id, .{ .widget = .{ .box = row_box }, .rect = null, .min_size = null });
         }
 
-        box.getFocus().child_id = box.children.keys()[add_index];
+        box.getFocus().child_id = box.children.keys()[about_index];
         var center = try ui.widget.Center.init(allocator, .{ .box = box });
         errdefer center.deinit(allocator);
         return .{
@@ -154,16 +158,21 @@ pub const View = struct {
     }
 
     fn nameInput(self: *View) *wgt.TextInput {
-        return &self.addBox().children.values()[1].widget.text_input;
+        return &self.addBox().children.values()[0].widget.text_input;
     }
 
     fn addActive(self: *View) bool {
         return self.contentBox().getFocus().child_id == self.addBox().getFocus().id;
     }
 
+    fn aboutBox(self: *View) *wgt.Box(ui.Widget) {
+        return &self.contentBox().children.values()[about_index].widget.box;
+    }
+
     pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
         self.clearGrid();
         try self.labelAddInput(root_focus);
+        ui.widget.markAboutFocused(self.aboutBox(), root_focus);
         // the window's height as a minimum centers rows that fit
         try self.scroll.build(allocator, .{
             .min_size = .{ .width = constraint.min_size.width, .height = constraint.max_size.height orelse constraint.min_size.height },
@@ -206,7 +215,7 @@ pub const View = struct {
         switch (key) {
             .arrow_left, .arrow_right => _ = ui.widget.moveInSelectedRow(rows, root_focus, key == .arrow_right),
             else => {
-                // the add row sits above the rows, and a row's name is a link the host follows
+                // the text and the add row sit above the rows, and a row's name is a link the host follows
                 if (current <= add_index) return;
                 const row_box = &rows.children.values()[current].widget.box;
                 const button_id = row_box.getFocus().child_id orelse return;
@@ -241,8 +250,8 @@ pub const View = struct {
         return self.scroll.getFocus();
     }
 
-    // up leaves the view from the add row
+    // up leaves the view from the explanatory text
     pub fn atTop(self: *View) bool {
-        return self.addActive();
+        return self.contentBox().getFocus().child_id == self.aboutBox().getFocus().id;
     }
 };
