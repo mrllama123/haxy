@@ -282,7 +282,7 @@ fn testBranchMerge(selection: evt.Patch.MergeRevision) !void {
     try std.testing.expectEqualStrings("base.txt", diff_before.window.hunks[0].path orelse return error.MissingPath);
     _ = try repo.commitAtRef(io, allocator, .{ .message = "rewrite history", .parent_oids = &.{} }, null, .{ .kind = .head, .name = "master" });
     try repo.removeBranch(io, .{ .name = "feature" });
-    _ = try repo.garbageCollect(io, allocator, .{});
+    _ = try repo.garbageCollect(io, allocator, .{}, null);
     {
         var moment = try repo.core.latestMoment();
         const state = rp.Repo(.xit, opts).State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };
@@ -790,7 +790,7 @@ test "patch event conflicts, stacking, and gc" {
         const roots = try evt.PatchRev.gcRoots(Repo.DB, repo_opts.hash, allocator, stacked_moment);
         defer allocator.free(roots);
         try std.testing.expectEqual(4, roots.len);
-        _ = try target.garbageCollect(io, allocator, .{ .extra_roots = roots });
+        _ = try target.garbageCollect(io, allocator, .{ .extra_roots = roots }, null);
 
         var after_gc_moment = try target.core.latestMoment();
         const after_gc_state = Repo.State(.read_only){ .core = &target.core, .extra = .{ .moment = &after_gc_moment } };

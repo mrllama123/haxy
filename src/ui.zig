@@ -435,8 +435,6 @@ pub const RoutablePage = union(enum) {
     pub const RepoUndoRoute = struct {
         name: Array(repo_identity_max_len),
         index: ?u64 = null,
-        // the clear-history confirmation page, which has no selected entry
-        clear: bool = false,
     };
 
     pub const RepoMembersRoute = struct {
@@ -468,10 +466,6 @@ pub const RoutablePage = union(enum) {
 
     pub fn repoUndoRoute(identity: []const u8, index: ?u64) ?RoutablePage {
         return .{ .repo_undo = .{ .name = Array(repo_identity_max_len).from(identity) orelse return null, .index = index } };
-    }
-
-    pub fn repoUndoClearRoute(identity: []const u8) ?RoutablePage {
-        return .{ .repo_undo = .{ .name = Array(repo_identity_max_len).from(identity) orelse return null, .clear = true } };
     }
 
     pub const RepoEventsRoute = struct {
@@ -1263,9 +1257,7 @@ pub const RoutablePage = union(enum) {
             },
             .repo_undo => |u| blk: {
                 const prefix = try repoUrlPrefix(arena, u.name.slice());
-                break :blk if (u.clear)
-                    try arena.allocator().print("{s}/undo/clear", .{prefix})
-                else if (u.index) |index|
+                break :blk if (u.index) |index|
                     try arena.allocator().print("{s}/undo/{d}", .{ prefix, index })
                 else
                     try arena.allocator().print("{s}/undo", .{prefix});
@@ -1790,7 +1782,6 @@ pub const RoutablePage = union(enum) {
             const word = segments.next();
             if (segments.next() != null) return null;
             const value = word orelse return repoUndoRoute(pair, null);
-            if (std.mem.eql(u8, value, "clear")) return repoUndoClearRoute(pair);
             return repoUndoRoute(pair, std.fmt.parseInt(u64, value, 10) catch return null);
         }
         if (std.mem.eql(u8, tab, "events")) {
@@ -1930,8 +1921,7 @@ pub const RoutablePage = union(enum) {
                 a_p.comments_start == b.repo_patches.comments_start and
                 std.mem.eql(u8, a_p.comment.slice(), b.repo_patches.comment.slice()),
             .repo_undo => |a_u| std.mem.eql(u8, a_u.name.slice(), b.repo_undo.name.slice()) and
-                a_u.index == b.repo_undo.index and
-                a_u.clear == b.repo_undo.clear,
+                a_u.index == b.repo_undo.index,
             .repo_events => |a_e| std.mem.eql(u8, a_e.name.slice(), b.repo_events.name.slice()) and
                 a_e.view == b.repo_events.view and
                 a_e.moment == b.repo_events.moment and

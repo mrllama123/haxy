@@ -45,12 +45,10 @@ items: []const Item = &.{},
 next: ?u64 = null,
 failure: ?[]const u8 = null,
 handle: ui.RepoHandle,
-// the clear-history confirmation stands in for the list
-clear: bool = false,
 
-// no history and no failure outside the clear form, which shows the empty message
+// no history and no failure, which shows the empty message
 fn isEmpty(self: *const Self, session: *ui.Session) bool {
-    return !self.clear and self.items.len == 0 and (session.data.undo_failure orelse self.failure) == null;
+    return self.items.len == 0 and (session.data.undo_failure orelse self.failure) == null;
 }
 
 pub fn init(comptime opts: rp.RepoOpts(.xit), arena: *std.heap.ArenaAllocator, repo: *rp.Repo(.xit, opts), haxy_moment: ?evt.AdminDB.HashMap(.read_only), identity: []const u8, selected: ?u64, handle: ui.RepoHandle) !Self {
@@ -255,7 +253,7 @@ fn pushRefs(arena: *std.heap.ArenaAllocator, identity: []const u8, payload: []co
 
 // the push record stores the email of the user whose key the server accepted.
 // resolving it names them as they are now, and leaves the email when no user
-// holds it, which is also what local mode sees with no admin db to read
+// holds it
 fn pushUser(arena: *std.heap.ArenaAllocator, haxy_moment: ?evt.AdminDB.HashMap(.read_only), payload: []const u8) !?DetailButton {
     const Payload = struct { author: struct { email: []const u8 } };
     const parsed = std.json.parseFromSlice(Payload, arena.child_allocator, payload, .{ .ignore_unknown_fields = true }) catch |err| switch (err) {
@@ -313,32 +311,10 @@ fn momentIndex(comptime opts: rp.RepoOpts(.xit), haxy_moment: evt.EventDB(opts.h
 }
 
 pub fn execute(io: std.Io, allocator: std.mem.Allocator, source: ui.RepoSource, index: u64) !void {
-    if (source.repo_kind != .xit) return error.NotFound;
     var any_repo = try rp.AnyRepo(.xit, .{}).open(io, allocator, source.localInitOpts());
     defer any_repo.deinit(io, allocator);
     switch (any_repo) {
         inline else => |*repo| try repo.undo(io, index),
-    }
-}
-
-// discard every earlier transaction by compacting the database. the patch
-// revisions events point at are unreachable from the refs, so they are named
-// as extra roots to survive the collection.
-pub fn clearHistory(io: std.Io, allocator: std.mem.Allocator, source: ui.RepoSource) !void {
-    if (source.repo_kind != .xit) return error.NotFound;
-    var any_repo = try rp.AnyRepo(.xit, .{}).open(io, allocator, source.localInitOpts());
-    defer any_repo.deinit(io, allocator);
-    switch (any_repo) {
-        inline else => |*repo| {
-            const opts = repo.self_repo_opts;
-            // a repo that has consumed no events has no revisions to protect
-            const roots = if (evt.currentMoment(opts, repo)) |moment|
-                try evt.PatchRev.gcRoots(rp.Repo(.xit, opts).DB, opts.hash, allocator, moment)
-            else |_|
-                &.{};
-            defer allocator.free(roots);
-            _ = try repo.garbageCollect(io, allocator, .{ .extra_roots = roots });
-        },
     }
 }
 
@@ -355,17 +331,16 @@ pub fn handleRequest(allocator: std.mem.Allocator, session: *ui.Session, target:
 // the repository; the web handler uses its matching http authorization path.
 pub fn perform(allocator: std.mem.Allocator, session: *ui.Session, target: ui.RoutablePage.RepoUndoRoute) !void {
     const identity = target.name.slice();
-    const index = if (target.clear) null else target.index orelse return error.InvalidHistoryIndex;
+    const index = target.index orelse return error.InvalidHistoryIndex;
     const source = try authorizedSource(session, identity) orelse return error.Forbidden;
     const io = session.io orelse return error.NotFound;
-    if (index) |value| try execute(io, allocator, source, value) else try clearHistory(io, allocator, source);
+    try execute(io, allocator, source, index);
     try session.navigate(ui.RoutablePage.repoUndoRoute(identity, null) orelse return error.RouteTooLong);
 }
 
 // the repo an owner may act on, or null when they may not
 fn authorizedSource(session: *ui.Session, identity: []const u8) !?ui.RepoSource {
     if (try session.authorize(identity, .owner, null) == null) return null;
-    if (session.local) |local| return local;
     const admin_repo = session.admin_repo orelse return error.NotFound;
     const moment = try evt.currentMoment(evt.admin_repo_opts, admin_repo);
     const pair = ui.RoutablePage.RepoIdentity.parse(identity) orelse return error.NotFound;
@@ -384,8 +359,8 @@ pub const View = struct {
 
     const list_max_width = 20;
     const detail_min_width = 40;
+    // the sub header leads the box where there is one
     const header_index = 0;
-    const content_index = 1;
     // the undo button and timestamp stay; everything below them is rebuilt
     const fixed_rows = 2;
 
@@ -393,29 +368,36 @@ pub const View = struct {
         var outer = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .vert });
         errdefer outer.deinit(allocator);
 
-        // the sub header carries the tab's only action
-        {
+        // the sub header holds the command that clears the history. a server
+        // without ssh has no way to.
+        if (session.data.git_ssh_port) |port| {
             var header_scroll = try ui.widget.HeaderScroll.init(allocator, session);
             errdefer header_scroll.deinit(allocator);
-            const header = header_scroll.row();
-            const route = ui.RoutablePage.repoUndoClearRoute(data.identity) orelse return error.RouteTooLong;
-            const link = try session.page_arena.allocator().print("a:{s}", .{try route.toUrl(session.page_arena)});
-            const clear_label = "clear undo history";
-            try addText(allocator, header, clear_label, link, .single);
-            // one line wide, so a narrow window scrolls the row instead of wrapping it
-            header.children.values()[0].min_size = .{ .width = clear_label.len + 2, .height = null };
-            header.getFocus().child_id = header.children.keys()[0];
+            {
+                const aa = session.page_arena.allocator();
+                const command = try aa.print("git push ssh://localhost:{d}/{s} :" ++ push.clear_undo_ref, .{ port, data.identity });
+                var copyable_text = try ui.widget.CopyableText.init(allocator, session, &.{.{
+                    .text = command,
+                    .copyable_text = try aa.print("{s}{s}", .{ session.data.git_ssh_prefix, command }),
+                    .label = " clear undo history ",
+                }}, 0);
+                errdefer copyable_text.deinit(allocator);
+                const min_width = copyable_text.minWidth();
+                const row = header_scroll.row();
+                row.getFocus().child_id = copyable_text.getFocus().id;
+                try row.children.put(allocator, copyable_text.getFocus().id, .{ .widget = .{ .copyable_text = copyable_text }, .rect = null, .min_size = .{ .width = min_width, .height = 3 }, .max_size = .{ .width = min_width, .height = 3 } });
+            }
             // a row taller than the header, leaving a blank line beneath it
             try outer.children.put(allocator, header_scroll.getFocus().id, .{ .widget = .{ .header_scroll = header_scroll }, .rect = null, .min_size = .{ .width = null, .height = 4 } });
         }
 
-        // the clear form, or the empty message when there is no history or failure to show
-        if (data.clear or data.isEmpty(session)) {
-            var center = if (data.clear) try initClearForm(allocator, data, session) else try ui.widget.initEmpty(allocator);
+        // the empty message when there is no history or failure to show
+        if (data.isEmpty(session)) {
+            var center = try ui.widget.initEmpty(allocator);
             errdefer center.deinit(allocator);
             try outer.children.put(allocator, center.getFocus().id, .{ .widget = .{ .center = center }, .rect = null, .min_size = null });
-            // the empty message has nothing to focus, so focus rests on the sub-header
-            outer.getFocus().child_id = outer.children.keys()[if (data.clear) content_index else header_index];
+            // the empty message has nothing to focus, so focus rests on the sub header where there is one
+            outer.getFocus().child_id = outer.children.keys()[header_index];
             return .{ .box = outer, .data = data, .session = session };
         }
 
@@ -465,29 +447,8 @@ pub const View = struct {
         }
         box.getFocus().child_id = box.children.keys()[if (data.items.len > 0) 1 else 0];
         try outer.children.put(allocator, box.getFocus().id, .{ .widget = .{ .box = box }, .rect = null, .min_size = null });
-        outer.getFocus().child_id = outer.children.keys()[content_index];
+        outer.getFocus().child_id = outer.children.keys()[outer.children.count() - 1];
         return .{ .box = outer, .data = data, .session = session };
-    }
-
-    // the same shape the thread views use to confirm a removal
-    fn initClearForm(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !ui.widget.Center {
-        var box = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .round_corners = true, .direction = .vert });
-        errdefer box.deinit(allocator);
-        const route = ui.RoutablePage.repoUndoClearRoute(data.identity) orelse return error.RouteTooLong;
-        box.getFocus().kind = .{ .custom = try session.page_arena.allocator().print("form:{s}", .{try route.toUrl(session.page_arena)}) };
-
-        var prompt = try wgt.Text.init(allocator, "are you sure?");
-        errdefer prompt.deinit(allocator);
-        try box.children.put(allocator, prompt.getFocus().id, .{ .widget = .{ .text = prompt }, .rect = null, .min_size = null });
-
-        var button = try wgt.TextBox.init(allocator, "clear undo history", .{ .border = .single, .round_corners = true, .wrap_kind = .none });
-        errdefer button.deinit(allocator);
-        button.getFocus().mode = .all;
-        button.getFocus().kind = if (data.handle.canUndo()) .{ .custom = "submit" } else .text_box;
-        try box.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = null });
-        box.getFocus().child_id = button.getFocus().id;
-
-        return ui.widget.Center.init(allocator, .{ .box = box });
     }
 
     fn addText(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), text: []const u8, link: ?[]const u8, border: wgt.Border) !void {
@@ -512,14 +473,19 @@ pub const View = struct {
         self.session.host_request = .{ .undo = route.repo_undo };
     }
 
-    fn headerBox(self: *View) *wgt.Box(ui.Widget) {
-        return self.box.children.values()[header_index].widget.header_scroll.row();
+    fn header(self: *View) ?*ui.widget.CopyableText {
+        return switch (self.box.children.values()[header_index].widget) {
+            .header_scroll => |*header_scroll| &header_scroll.row().children.values()[0].widget.copyable_text,
+            else => null,
+        };
     }
     fn headerActive(self: *View) bool {
+        if (self.header() == null) return false;
         return self.box.getFocus().child_id == self.box.children.keys()[header_index];
     }
+    // the content is last, below the sub header where there is one
     fn contentBox(self: *View) *wgt.Box(ui.Widget) {
-        return &self.box.children.values()[content_index].widget.box;
+        return &self.box.children.values()[self.box.children.count() - 1].widget.box;
     }
     fn listScroll(self: *View) *wgt.Scroll(ui.Widget) {
         return &self.contentBox().children.values()[0].widget.scroll;
@@ -581,8 +547,8 @@ pub const View = struct {
 
     pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
         self.clearGrid();
-        // the clear form or the empty message stands in for the list
-        if (self.data.clear or self.data.isEmpty(self.session)) return try self.box.build(allocator, constraint, root_focus);
+        // the empty message stands in for the list
+        if (self.data.isEmpty(self.session)) return try self.box.build(allocator, constraint, root_focus);
         try self.refreshDetail(allocator);
         const rows = &self.listScroll().child.box;
         if (self.data.items.len == 0) {
@@ -604,32 +570,32 @@ pub const View = struct {
     }
 
     pub fn input(self: *View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
-        // the sub header sits above whichever content the route selects.
-        // scrolling crosses the boundary the same way the arrow keys do
+        // scrolling crosses the sub header boundary the same way the arrow keys do
         const direction = inp.vertDirection(key);
         if (self.headerActive()) {
-            // the empty message has nothing to focus
-            if (direction == .down and !self.data.isEmpty(self.session)) root_focus.setFocus(self.box.children.values()[content_index].widget.getFocus().id);
-            return;
+            // active means there is one
+            const copyable_text = self.header() orelse unreachable;
+            if (direction == .down) {
+                // the empty message has nothing to focus
+                if (!self.data.isEmpty(self.session)) root_focus.setFocus(self.contentBox().getFocus().id);
+                return;
+            }
+            return copyable_text.input(allocator, key, root_focus);
         }
-        if (self.data.clear) {
-            if (direction == .up) root_focus.setFocus(self.headerBox().getFocus().id) else try self.clearInput(key, root_focus);
-            return;
-        }
+        // the empty message has nothing to focus
+        if (self.data.isEmpty(self.session)) return;
         // the way back to the list, by enter or a click
         if (self.detailActive()) if (ui.widget.listBackId(self.detailFrame())) |id| {
             if (inp.activated(root_focus, id, key)) return self.focusList(root_focus);
             if (root_focus.grandchild_id == id) return switch (direction) {
-                .up => root_focus.setFocus(self.headerBox().getFocus().id),
+                // without a sub header, atTop hands it to the page's tabs
+                .up => _ = self.focusHeader(root_focus),
                 .down => root_focus.setFocus(self.detailScroll().getFocus().id),
                 .none => if (key == .arrow_left) self.focusList(root_focus),
             };
             if (direction == .up and self.contentAtTop()) return root_focus.setFocus(id);
         };
-        if (direction == .up and self.contentAtTop()) {
-            root_focus.setFocus(self.headerBox().getFocus().id);
-            return;
-        }
+        if (direction == .up and self.contentAtTop() and self.focusHeader(root_focus)) return;
         try self.refreshDetail(allocator);
         if (self.detailActive()) {
             const details = &self.detailScroll().child.box;
@@ -668,14 +634,6 @@ pub const View = struct {
         root_focus.setFocus(self.listScroll().getFocus().id);
     }
 
-    // the confirm button submits the form the web renderer posts
-    fn clearInput(self: *View, key: Key, root_focus: *Focus) !void {
-        const center = &self.box.children.values()[content_index].widget.center;
-        const button_id = center.child.box.getFocus().child_id orelse return;
-        if (!inp.activated(root_focus, button_id, key) or !self.data.handle.canUndo()) return;
-        self.requestUndo(ui.RoutablePage.repoUndoClearRoute(self.data.identity) orelse return error.RouteTooLong);
-    }
-
     fn contentAtTop(self: *View) bool {
         const scroll = if (self.detailActive()) self.detailScroll() else self.listScroll();
         const rows = &scroll.child.box;
@@ -683,14 +641,20 @@ pub const View = struct {
         return rows.children.getIndex(id) == 0 and scroll.y == 0;
     }
 
-    // moving up from the sub header returns to the page's tabs
+    // moving up from the sub header returns to the page's tabs, as does moving
+    // up from the top of the content where there is no sub header
     pub fn atTop(self: *View) bool {
-        return self.headerActive();
+        if (self.header() != null) return self.headerActive();
+        if (self.data.isEmpty(self.session)) return true;
+        // the way back to the list sits above the detail while it shows
+        if (self.detailActive()) if (ui.widget.listBackId(self.detailFrame())) |id| return self.detailFrame().getFocus().child_id == id;
+        return self.contentAtTop();
     }
 
     // arriving from the page's tabs lands on the sub header, not the content
     pub fn focusHeader(self: *View, root_focus: *Focus) bool {
-        root_focus.setFocus(self.headerBox().getFocus().id);
+        const copyable_text = self.header() orelse return false;
+        root_focus.setFocus(copyable_text.getFocus().id);
         return true;
     }
     pub fn deinit(self: *View, allocator: std.mem.Allocator) void {

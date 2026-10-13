@@ -294,8 +294,8 @@ pub fn init(
     };
     if (route_thread_kind) |kind| if (repo.event.threadRole(kind) == null) return error.NotFound;
     const undo_index = if (route == .repo_undo) route.repo_undo.index else null;
-    const undo_clear = route == .repo_undo and route.repo_undo.clear;
-    // only xit repos have undo history, so it's read in their branch below
+    // only xit repos have undo history, so it's read in their branch below.
+    // local mode leaves undo to xit itself.
     var undo_data: ?Undo = null;
     // only the owner sees the settings, which show the repo's hash kind
     var settings: ?Settings = null;
@@ -337,7 +337,7 @@ pub fn init(
                                 };
                             }
                             // tabs switch in-page, so every tab's data is read here
-                            if (repo_kind == .xit and handle.canWrite()) {
+                            if (repo_kind == .xit and session.data.host_kind == .server and handle.canWrite()) {
                                 undo_data = Undo.init(opened.self_repo_opts, arena, opened, session.haxy_moment, repo_identity.identity, undo_index, handle) catch |err| switch (err) {
                                     error.OutOfMemory => return err,
                                     else => .{ .identity = try arena.allocator().dupe(u8, repo_identity.identity), .handle = handle, .failure = @errorName(err) },
@@ -398,7 +398,6 @@ pub fn init(
     };
     if (route == .repo_undo and undo_data == null) return error.NotFound;
     if ((route == .repo_settings or route == .repo_members or route == .repo_branches) and settings == null) return error.NotFound;
-    if (undo_data) |*undo| undo.clear = undo_clear;
     discussions.repo_source = source;
     issues.repo_source = source;
     patches.repo_source = source;

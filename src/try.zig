@@ -911,7 +911,7 @@ pub fn main(init: std.process.Init) !void {
                 const moment = try evt.currentMoment(.{}, &template_repo);
                 const roots = try evt.PatchRev.gcRoots(rp.Repo(.xit, .{}).DB, .sha1, allocator, moment);
                 defer allocator.free(roots);
-                _ = try template_repo.garbageCollect(io, allocator, .{ .extra_roots = roots });
+                _ = try template_repo.garbageCollect(io, allocator, .{ .extra_roots = roots }, null);
             }
         }
 
@@ -1197,7 +1197,7 @@ fn seedPatchRevision(
     try fork_repo.patchAll(io, allocator, null);
     try fork_repo.addConfig(io, allocator, .{ .name = "core.bare", .value = "true" });
     try transaction(io, &fork_repo, Reindex{ .io = io, .allocator = allocator, .core = &fork_repo.core, .commits = false });
-    _ = try fork_repo.garbageCollect(io, allocator, .{});
+    _ = try fork_repo.garbageCollect(io, allocator, .{}, null);
     try fork_dir.deleteFile(io, path);
     const revision_id = evt.EventWithId.randomId(random);
     const head_tree_oid = try commitTree(io, allocator, &fork_repo, &source_oid);

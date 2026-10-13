@@ -81,6 +81,13 @@ test "push fork" {
     try testPushFork(.sha256, 3803, io, allocator);
 }
 
+test "push clears undo history" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    try testPushClearUndo(.sha1, 3901, io, allocator);
+    try testPushClearUndo(.sha256, 3903, io, allocator);
+}
+
 fn runServer(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -1605,6 +1612,118 @@ fn testPushLarge(
 
         try std.testing.expectError(error.FileNotFound, server_repo.core.work_dir.openFile(io, "hello.txt", .{}));
     }
+}
+
+fn testPushClearUndo(
+    comptime hash_kind: hash.HashKind,
+    comptime port: u16,
+    io: std.Io,
+    allocator: std.mem.Allocator,
+) !void {
+    const repo_opts: rp.RepoOpts(.xit) = .{ .hash = hash_kind, .is_test = true };
+
+    // create the temp dir
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(temp_path);
+
+    // init server
+    var server_process = try runServer(io, allocator, temp_path, port);
+    defer _ = server_process.kill(io);
+
+    // register the repo under admin and locate its on-disk directory
+    const server_path = (try repoOnDiskPath(io, allocator, temp_path, "testrepo", true)).?;
+    defer allocator.free(server_path);
+    {
+        var server_repo = try rp.Repo(.xit, repo_opts).init(io, allocator, .{ .bare = true, .path = server_path });
+        defer server_repo.deinit(io, allocator);
+    }
+
+    // a git client with one commit to push
+    const client_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "client" });
+    defer allocator.free(client_path);
+    const commit = blk: {
+        var client_repo = try rp.Repo(.git, .{ .hash = hash_kind, .is_test = true }).init(io, allocator, .{ .path = client_path });
+        defer client_repo.deinit(io, allocator);
+        const hello_txt = try client_repo.core.work_dir.createFile(io, "hello.txt", .{ .truncate = true });
+        defer hello_txt.close(io);
+        try hello_txt.writeStreamingAll(io, "hello, world!");
+        try client_repo.add(io, allocator, &.{"hello.txt"});
+        const remote_url = try remoteUrl(.{ .wire = .ssh }, allocator, "testrepo", port);
+        defer allocator.free(remote_url);
+        try client_repo.addRemote(io, allocator, .{ .name = "origin", .value = remote_url });
+        break :blk try client_repo.commit(io, allocator, .{ .message = "let there be light" });
+    };
+
+    const ssh_cmd = (try sshCommand(true, allocator, temp_path, port)).?;
+    defer allocator.free(ssh_cmd);
+    const ssh_config_arg = try allocator.print("core.sshCommand={s}", .{ssh_cmd});
+    defer allocator.free(ssh_config_arg);
+
+    {
+        const result = try gitPush(io, allocator, client_path, ssh_config_arg, &.{"master"});
+        defer allocator.free(result.stderr);
+        try std.testing.expect(result.ok);
+    }
+    const pushed_count = try historyCount(repo_opts, io, allocator, server_path);
+    try std.testing.expect(pushed_count > 1);
+
+    // the clear ref can only be deleted
+    {
+        const result = try gitPush(io, allocator, client_path, ssh_config_arg, &.{"master:refs/haxy/undo"});
+        defer allocator.free(result.stderr);
+        try std.testing.expect(!result.ok);
+        try std.testing.expect(std.mem.indexOf(u8, result.stderr, "can only be deleted") != null);
+    }
+
+    // and only alone, refusing the whole push
+    {
+        const result = try gitPush(io, allocator, client_path, ssh_config_arg, &.{ "master:refs/heads/other", ":refs/haxy/undo" });
+        defer allocator.free(result.stderr);
+        try std.testing.expect(!result.ok);
+        try std.testing.expect(std.mem.indexOf(u8, result.stderr, "must be deleted alone") != null);
+    }
+
+    // a refused push leaves no transaction behind
+    try std.testing.expectEqual(pushed_count, try historyCount(repo_opts, io, allocator, server_path));
+
+    {
+        const result = try gitPush(io, allocator, client_path, ssh_config_arg, &.{":refs/haxy/undo"});
+        defer allocator.free(result.stderr);
+        try std.testing.expect(result.ok);
+        try std.testing.expect(std.mem.indexOf(u8, result.stderr, "Compacting database") != null);
+    }
+
+    // one transaction is left, and it still holds the pushed branch
+    try std.testing.expectEqual(1, try historyCount(repo_opts, io, allocator, server_path));
+    {
+        var server_repo = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = server_path });
+        defer server_repo.deinit(io, allocator);
+        try std.testing.expectEqualStrings(&commit, &(try server_repo.readRef(io, .{ .kind = .head, .name = "master" })).?);
+        try std.testing.expectEqual(null, try server_repo.readRef(io, .{ .kind = .head, .name = "other" }));
+    }
+}
+
+// whether a git push from the client succeeded, and what it printed. progress
+// is forced on, since git hides it when stderr isn't a terminal.
+fn gitPush(io: std.Io, allocator: std.mem.Allocator, client_path: []const u8, ssh_config_arg: []const u8, refspecs: []const []const u8) !struct { ok: bool, stderr: []u8 } {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(allocator);
+    try argv.appendSlice(allocator, &.{ "git", "-c", ssh_config_arg, "push", "--progress", "origin" });
+    try argv.appendSlice(allocator, refspecs);
+    const result = try std.process.run(allocator, io, .{ .argv = argv.items, .cwd = .{ .path = client_path } });
+    allocator.free(result.stdout);
+    return .{ .ok = result.term == .exited and result.term.exited == 0, .stderr = result.stderr };
+}
+
+// the number of transactions in a repo's history. opened afresh each time,
+// since gc replaces the database file.
+fn historyCount(comptime repo_opts: rp.RepoOpts(.xit), io: std.Io, allocator: std.mem.Allocator, path: []const u8) !u64 {
+    var repo = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = path });
+    defer repo.deinit(io, allocator);
+    const history = try rp.Repo(.xit, repo_opts).DB.ArrayList(.read_only).init(repo.core.db.rootCursor().readOnly());
+    return try history.count();
 }
 
 fn copyDir(io: std.Io, src_dir: std.Io.Dir, dest_dir: std.Io.Dir) !void {

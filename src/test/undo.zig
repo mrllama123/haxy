@@ -137,7 +137,7 @@ test "repo undo visibility and fresh owner authorization" {
     try std.testing.expectEqual(null, session.next_page);
 }
 
-test "local git has no undo and local xit can undo and refresh" {
+test "local mode has no undo" {
     inline for ([_]xit.repo.RepoKind{ .git, .xit }) |kind| {
         var temp = std.testing.tmpDir(.{});
         defer temp.cleanup();
@@ -147,24 +147,11 @@ test "local git has no undo and local xit can undo and refresh" {
         {
             var repo = try xit.repo.Repo(kind, .{}).init(io, allocator, .{ .path = path });
             defer repo.deinit(io, allocator);
-            try repo.addConfig(io, allocator, .{ .name = "undo.value", .value = "first" });
         }
         var session = ui.Session{ .arena = &arena, .page_arena = &arena, .io = io, .local = .{ .path = path, .repo_kind = kind }, .data = .{ .host_kind = .local } };
-        const files = ui.RoutablePage.repoFilesRoute("", null, "", "", 0).?;
-        const data = try ui.Repo.init(&arena, &session, files);
-        try std.testing.expectEqual(kind == .xit, data.undo != null);
-        if (kind == .git) {
-            try std.testing.expectError(error.NotFound, ui.Repo.init(&arena, &session, ui.RoutablePage.repoUndoRoute("", null).?));
-            try std.testing.expectError(error.NotFound, Undo.execute(io, allocator, session.local.?, 1));
-        } else {
-            Undo.handleRequest(allocator, &session, ui.RoutablePage.repoUndoRoute("", 999).?.repo_undo);
-            try std.testing.expectEqualStrings("InvalidHistoryIndex", session.data.undo_failure.?);
-            try std.testing.expectEqual(null, session.next_page);
-            Undo.handleRequest(allocator, &session, ui.RoutablePage.repoUndoRoute("", 1).?.repo_undo);
-            try std.testing.expectEqual(null, session.data.undo_failure);
-            const refreshed = try ui.Repo.init(&arena, &session, session.next_page.?);
-            try std.testing.expectEqualStrings("undo", refreshed.undo.?.items[0].action);
-        }
+        const data = try ui.Repo.init(&arena, &session, ui.RoutablePage.repoFilesRoute("", null, "", "", 0).?);
+        try std.testing.expect(data.undo == null);
+        try std.testing.expectError(error.NotFound, ui.Repo.init(&arena, &session, ui.RoutablePage.repoUndoRoute("", null).?));
     }
 }
 
@@ -187,7 +174,26 @@ test "malformed undo history is shown as an error" {
     defer temp.cleanup();
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const path = try temp.dir.realPathFileAlloc(io, ".", arena.allocator());
+    const aa = arena.allocator();
+
+    // a server with one user who owns the repo
+    const base = try temp.dir.realPathFileAlloc(io, ".", aa);
+    const admin_path = try std.Io.Dir.path.join(aa, &.{ base, "admin" });
+    const users_dir = try std.Io.Dir.path.join(aa, &.{ base, "users" });
+    var admin = try xit.repo.Repo(.xit, evt.admin_repo_opts).init(io, allocator, .{ .path = admin_path });
+    defer admin.deinit(io, allocator);
+    const owner: [evt.event_id_size]u8 = @splat(1);
+    const repo_id: [evt.event_id_size]u8 = @splat(4);
+    const author: evt.CommitAuthor = .{ .name = "test", .email = "test@example.test" };
+    try evt.consume(.{ .server = .{ .users_dir = users_dir } }, .admin, .xit, evt.admin_repo_opts, io, allocator, &admin, evt.events_ref, &.{
+        .{ .id = std.fmt.bytesToHex(owner, .lower), .author = author, .event = .{ .user = .{ .name = "alice", .email = "alice@example.test", .password_hash = "unused" } } },
+    });
+    var user_repo = try evt.initUserRepo(io, allocator, try evt.userRepoPath(aa, users_dir, &owner));
+    defer user_repo.deinit(io, allocator);
+    try evt.consume(.{ .server = .{ .users_dir = users_dir } }, .user, .xit, evt.user_repo_opts, io, allocator, &user_repo, evt.events_ref, &.{
+        .{ .id = std.fmt.bytesToHex(repo_id, .lower), .author = author, .event = .{ .repo = .{ .user_id = std.fmt.bytesToHex(owner, .lower), .name = "demo", .description = "", .read_access = .public } } },
+    });
+    const path = try evt.repoPath(aa, users_dir, &owner, &repo_id);
     const Repo = xit.repo.Repo(.xit, .{});
     var repo = try Repo.init(io, allocator, .{ .path = path });
     defer repo.deinit(io, allocator);
@@ -202,12 +208,14 @@ test "malformed undo history is shown as an error" {
     const history = try Repo.DB.ArrayList(.read_write).init(repo.core.db.rootCursor());
     try history.appendContext(.{ .slot = try history.getSlot(-1) }, Corrupt{});
 
-    var session = ui.Session{ .arena = &arena, .page_arena = &arena, .io = io, .local = .{ .path = path, .repo_kind = .xit }, .data = .{ .host_kind = .local } };
+    var session = try ui.Session.init(&arena, &admin, .{ .user_id = &owner });
+    session.io = io;
+    session.users_dir = users_dir;
     // tabs switch in-page, so every tab carries the undo data and its failure
-    const files = try ui.Repo.init(&arena, &session, ui.RoutablePage.repoFilesRoute("", null, "", "", 0).?);
+    const files = try ui.Repo.init(&arena, &session, ui.RoutablePage.repoFilesRoute("alice:demo", null, "", "", 0).?);
     try std.testing.expectEqual(0, files.undo.?.items.len);
     try std.testing.expectEqualStrings("InvalidUndoRecord", files.undo.?.failure.?);
-    const undo = try ui.Repo.init(&arena, &session, ui.RoutablePage.repoUndoRoute("", null).?);
+    const undo = try ui.Repo.init(&arena, &session, ui.RoutablePage.repoUndoRoute("alice:demo", null).?);
     try std.testing.expectEqualStrings("InvalidUndoRecord", undo.undo.?.failure.?);
 
     var root = ui.Widget{ .repo_undo = try Undo.View.init(allocator, &undo.undo.?, &session) };

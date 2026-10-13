@@ -44,6 +44,10 @@ pub fn writeReceivedPatches(
 // the action a received push records
 pub const undo_action = "haxy/push";
 
+// deleting this ref, as a push's only update, clears the undo history. it
+// never exists, so a push has to name it in full.
+pub const clear_undo_ref = "refs/haxy/undo";
+
 // the fixture records a stand-in push with this too, so both write one shape
 pub fn writeUndo(
     comptime repo_opts: rp.RepoOpts(.xit),
@@ -157,6 +161,11 @@ pub fn receivePackAndConsume(
             receive_options.applied_ref_updates = ctx.updates;
             receive_options.deferred_response = ctx.response;
             try xit.net_server_receive_pack.run(.xit, repo_opts, state, ctx.io, ctx.allocator, ctx.reader, ctx.writer, receive_options, ctx.sideband);
+            // receive-pack refuses the clear ref alongside any other update.
+            // clearing writes nothing here, and runs once this transaction
+            // lets go of the lock.
+            const applied = ctx.updates.items.items;
+            if (applied.len == 1 and std.mem.eql(u8, applied[0].ref_name, clear_undo_ref)) return error.ClearUndoHistory;
             try writeReceivedPatches(repo_opts, state, ctx.io, ctx.allocator, ctx.response, ctx.writer);
             if (ctx.sideband.gone) return error.ClientGone;
 
@@ -211,10 +220,20 @@ pub fn receivePackAndConsume(
             },
         );
     };
-    result catch |err| {
-        response.finish(writer, @errorName(err)) catch {};
-        if (err == error.CancelTransaction) return;
-        return err;
+    result catch |err| switch (err) {
+        // a refused push has already written the report saying why
+        error.CancelTransaction => return response.finish(writer, null),
+        error.ClearUndoHistory => {
+            clearUndoHistory(repo_opts, io, allocator, repo, &sideband) catch |clear_err| {
+                response.finish(writer, @errorName(clear_err)) catch {};
+                return clear_err;
+            };
+            return response.finish(writer, null);
+        },
+        else => {
+            response.finish(writer, @errorName(err)) catch {};
+            return err;
+        },
     };
     if (moment_index) |index| notify.deliverTransaction(io, allocator, server, repo_opts, repo, index, pusher_id, &sideband);
     evt.bumpRepoActivityAt(io, allocator, server, repo.core.work_path);
@@ -224,6 +243,19 @@ pub fn receivePackAndConsume(
         pch.refreshOpenMergeability(repo_opts, io, allocator, repo, server.users_dir, null, &sideband);
     };
     try response.finish(writer, null);
+}
+
+// discard every earlier transaction by compacting the database. the patch
+// revisions events point at are unreachable from the refs, so they are named
+// as extra roots to survive the collection.
+fn clearUndoHistory(comptime repo_opts: rp.RepoOpts(.xit), io: std.Io, allocator: std.mem.Allocator, repo: *rp.Repo(.xit, repo_opts), sideband: *progress.Sideband) !void {
+    // a repo that has consumed no events has no revisions to protect
+    const roots = if (evt.currentMoment(repo_opts, repo)) |moment|
+        try evt.PatchRev.gcRoots(rp.Repo(.xit, repo_opts).DB, repo_opts.hash, allocator, moment)
+    else |_|
+        &.{};
+    defer allocator.free(roots);
+    _ = try repo.garbageCollect(io, allocator, .{ .extra_roots = roots }, sideband);
 }
 
 pub fn receiveFork(

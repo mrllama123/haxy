@@ -158,7 +158,7 @@ fn handleRequest(
         switch (host) {
             .server => |server| {
                 // "repo/new" and "user/new" come before "new", which would claim them
-                const PostRoute = enum { login, logout, @"repo/new", @"user/new", user, addkey, removekey, settings, grant, revoke, promote, demote, protect, unprotect, new, edit, remove, open, close, resolve, publish, merge, squash, attach, assign, unassign, subscribe, mute, undo, clear };
+                const PostRoute = enum { login, logout, @"repo/new", @"user/new", user, addkey, removekey, settings, grant, revoke, promote, demote, protect, unprotect, new, edit, remove, open, close, resolve, publish, merge, squash, attach, assign, unassign, subscribe, mute, undo };
                 inline for (@typeInfo(PostRoute).@"enum".field_names) |name| {
                     const suffix = "/" ++ name;
                     if (std.mem.endsWith(u8, path, suffix)) {
@@ -187,8 +187,7 @@ fn handleRequest(
                             .publish => handlePatchPublish(io, request, allocator, base, host),
                             .merge => handlePatchMerge(io, request, allocator, base, host, .source),
                             .squash => handlePatchMerge(io, request, allocator, base, host, .squash),
-                            .undo => handleUndo(io, request, allocator, base, host, .undo),
-                            .clear => handleUndo(io, request, allocator, base, host, .clear),
+                            .undo => handleUndo(io, request, allocator, base, host),
                             .attach => handleAttach(io, request, allocator, base, host),
                             .assign => handleAssign(io, request, allocator, base, host),
                             .unassign => handleUnassign(io, request, allocator, base, host),
@@ -199,7 +198,7 @@ fn handleRequest(
                 }
             },
             .local => |local| {
-                const PostRoute = enum { new, edit, remove, open, close, resolve, sync, attach, assign, unassign, undo, clear };
+                const PostRoute = enum { new, edit, remove, open, close, resolve, sync, attach, assign, unassign };
                 inline for (@typeInfo(PostRoute).@"enum".field_names) |name| {
                     const suffix = "/" ++ name;
                     if (std.mem.endsWith(u8, path, suffix)) {
@@ -212,8 +211,6 @@ fn handleRequest(
                             .close => handleThreadStatus(io, request, allocator, base, host, false),
                             .resolve => handleThreadResolve(io, request, allocator, base, host),
                             .sync => handleSync(io, request, allocator, base, local),
-                            .undo => handleUndo(io, request, allocator, base, host, .undo),
-                            .clear => handleUndo(io, request, allocator, base, host, .clear),
                             .attach => handleAttach(io, request, allocator, base, host),
                             .assign => handleAssign(io, request, allocator, base, host),
                             .unassign => handleUnassign(io, request, allocator, base, host),
@@ -2228,8 +2225,8 @@ fn handleThreadResolve(
 }
 
 // the posted path drops the action's own segment, so the route it parses is
-// the undo page the action applies to, never the confirmation page itself
-fn handleUndo(io: std.Io, request: *std.http.Server.Request, allocator: std.mem.Allocator, base: []const u8, host: Host, action: enum { undo, clear }) !void {
+// the undo page the action applies to
+fn handleUndo(io: std.Io, request: *std.http.Server.Request, allocator: std.mem.Allocator, base: []const u8, host: Host) !void {
     const route = routeFromUrl(host, base) orelse return respondRepoNotFound(request);
     if (route != .repo_undo) return respondRepoNotFound(request);
     const target = route.repo_undo;
@@ -2239,10 +2236,7 @@ fn handleUndo(io: std.Io, request: *std.http.Server.Request, allocator: std.mem.
     _ = (try authorizeWrite(io, allocator, &arena, request, host, repo_base, .owner, null)) orelse return;
     const resolved = (try requestRepoSource(io, allocator, host, repo_base)) orelse return respondRepoNotFound(request);
     defer resolved.deinit(allocator);
-    (switch (action) {
-        .undo => ui.Repo.Undo.execute(io, allocator, resolved.source, target.index orelse return respondRepoNotFound(request)),
-        .clear => ui.Repo.Undo.clearHistory(io, allocator, resolved.source),
-    }) catch |err| switch (err) {
+    ui.Repo.Undo.execute(io, allocator, resolved.source, target.index orelse return respondRepoNotFound(request)) catch |err| switch (err) {
         error.NotFound, error.InvalidHistoryIndex, error.TransactionNotFound => return respondRepoNotFound(request),
         else => return err,
     };

@@ -1280,8 +1280,14 @@ pub const HeaderScroll = struct {
     pub fn build(self: *HeaderScroll, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
         self.clearGrid();
         const row_box = self.row();
-        // bring the focused child into view where the last build put it
-        if (!self.scroll.options.web_native) if (row_box.getFocus().child_id) |id| if (row_box.children.get(id)) |child| if (child.rect) |rect| self.scroll.scrollToRect(rect);
+        // bring the focused child into view where the last build put it. one
+        // wider than the window shows its start, since chasing both its edges
+        // would scroll back and forth on every build.
+        if (!self.scroll.options.web_native) if (row_box.getFocus().child_id) |id| if (row_box.children.get(id)) |child| if (child.rect) |rect| {
+            var target = rect;
+            if (self.scroll.viewport) |viewport| target.size.width = @min(rect.size.width, viewport.width);
+            self.scroll.scrollToRect(target);
+        };
 
         // the window's width, or the children's minimums when they need more.
         // only a max, since a min would stretch the row's last laid out child.
