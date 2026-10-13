@@ -102,7 +102,7 @@ pub const Page = union(PageKind) {
                 };
             },
             .repo => switch (route) {
-                .repo_files, .repo_commits, .repo_diff, .repo_refs, .repo_issues, .repo_patches, .repo_discussions, .repo_events, .repo_undo, .repo_settings, .repo_roles, .repo_repo_new, .repo_user_new, .repo_user => .{ .repo = try Repo.init(arena, session, route) },
+                .repo_files, .repo_commits, .repo_diff, .repo_refs, .repo_issues, .repo_patches, .repo_discussions, .repo_events, .repo_undo, .repo_settings, .repo_members, .repo_repo_new, .repo_user_new, .repo_user => .{ .repo = try Repo.init(arena, session, route) },
                 else => return error.UnexpectedRoute,
             },
             .fork => switch (route) {
@@ -193,7 +193,7 @@ pub const RoutablePage = union(enum) {
     repo_repo_new: Array(repo_route_max_len),
     repo_user_new: Array(repo_route_max_len),
     repo_settings: Array(repo_route_max_len),
-    repo_roles: RepoRolesRoute,
+    repo_members: RepoMembersRoute,
     repo_user: struct { name: Array(repo_route_max_len), tab: UserTab = .{} },
     fork_patch: ForkRoute,
     fork_diff: ForkDiffRoute,
@@ -438,21 +438,21 @@ pub const RoutablePage = union(enum) {
         clear: bool = false,
     };
 
-    pub const RepoRolesRoute = struct {
+    pub const RepoMembersRoute = struct {
         name: Array(repo_identity_max_len),
         start: usize = 0,
         // the user a row's form acts on ("" = none)
         user: Array(evt.User.name_max_len) = .{},
         // the confirmation of taking `user`'s role away
-        confirm: ?Repo.Roles.Action = null,
+        confirm: ?Repo.Members.Action = null,
     };
 
     pub fn repoSettingsRoute(identity: []const u8) ?RoutablePage {
         return .{ .repo_settings = Array(repo_route_max_len).from(identity) orelse return null };
     }
 
-    pub fn repoRolesRoute(identity: []const u8, start: usize) ?RoutablePage {
-        return .{ .repo_roles = .{ .name = Array(repo_identity_max_len).from(identity) orelse return null, .start = start } };
+    pub fn repoMembersRoute(identity: []const u8, start: usize) ?RoutablePage {
+        return .{ .repo_members = .{ .name = Array(repo_identity_max_len).from(identity) orelse return null, .start = start } };
     }
 
     pub fn repoUndoRoute(identity: []const u8, index: ?u64) ?RoutablePage {
@@ -1270,9 +1270,9 @@ pub const RoutablePage = union(enum) {
             .repo_repo_new => |name| try arena.allocator().print("{s}/repo/new", .{try repoUrlPrefix(arena, name.slice())}),
             .repo_user_new => |name| try arena.allocator().print("{s}/user/new", .{try repoUrlPrefix(arena, name.slice())}),
             .repo_settings => |name| try arena.allocator().print("{s}/repo/settings", .{try repoUrlPrefix(arena, name.slice())}),
-            .repo_roles => |r| blk: {
+            .repo_members => |r| blk: {
                 var out: std.Io.Writer.Allocating = .init(arena.allocator());
-                try out.writer.print("{s}/repo/roles", .{try repoUrlPrefix(arena, r.name.slice())});
+                try out.writer.print("{s}/repo/members", .{try repoUrlPrefix(arena, r.name.slice())});
                 if (r.user.len != 0) try out.writer.print("/" ++ user_seg ++ "{s}", .{r.user.slice()});
                 if (r.start != 0) try out.writer.print("/" ++ start_seg ++ "{d}", .{r.start});
                 if (r.confirm) |action| try out.writer.print("/{s}", .{@tagName(action)});
@@ -1456,7 +1456,7 @@ pub const RoutablePage = union(enum) {
             .repo_discussions => |*t| t.name.slice(),
             .repo_events => |*e| e.name.slice(),
             .repo_undo => |*u| u.name.slice(),
-            .repo_roles => |*r| r.name.slice(),
+            .repo_members => |*r| r.name.slice(),
             .repo_user => |*u| u.name.slice(),
             .repo_settings, .repo_repo_new, .repo_user_new => |*name| name.slice(),
             else => null,
@@ -1502,7 +1502,7 @@ pub const RoutablePage = union(enum) {
         return switch (self) {
             .home_about, .home_users, .home_repo_new, .home_user_new, .home_user => .home,
             .user_repos, .user_forks, .user_repo_new, .user_user_new, .user_user => .user,
-            .repo_files, .repo_commits, .repo_diff, .repo_refs, .repo_issues, .repo_patches, .repo_discussions, .repo_events, .repo_undo, .repo_settings, .repo_roles, .repo_repo_new, .repo_user_new, .repo_user => .repo,
+            .repo_files, .repo_commits, .repo_diff, .repo_refs, .repo_issues, .repo_patches, .repo_discussions, .repo_events, .repo_undo, .repo_settings, .repo_members, .repo_repo_new, .repo_user_new, .repo_user => .repo,
             .fork_patch, .fork_diff, .fork_files, .fork_commits, .fork_repo_new, .fork_user_new, .fork_user => .fork,
             .not_found => .not_found,
         };
@@ -1587,17 +1587,17 @@ pub const RoutablePage = union(enum) {
                 _ = segments.next();
                 return if (segments.next() == null) repoSettingsRoute(pair) else null;
             }
-            if (std.mem.eql(u8, word, "roles")) {
+            if (std.mem.eql(u8, word, "members")) {
                 _ = segments.next();
                 const confirm_word = params.scanTail(&segments) catch return null;
                 if (!params.only(&.{ .user, .start })) return null;
-                var route = repoRolesRoute(pair, params.start() orelse return null) orelse return null;
-                if (params.values.get(.user)) |user| route.repo_roles.user = Array(evt.User.name_max_len).from(user) orelse return null;
+                var route = repoMembersRoute(pair, params.start() orelse return null) orelse return null;
+                if (params.values.get(.user)) |user| route.repo_members.user = Array(evt.User.name_max_len).from(user) orelse return null;
                 if (confirm_word) |value| {
                     // only taking a role away asks first, and it names whose
-                    const action = std.meta.stringToEnum(Repo.Roles.Action, value) orelse return null;
-                    if ((action != .revoke and action != .demote) or route.repo_roles.user.len == 0) return null;
-                    route.repo_roles.confirm = action;
+                    const action = std.meta.stringToEnum(Repo.Members.Action, value) orelse return null;
+                    if ((action != .revoke and action != .demote) or route.repo_members.user.len == 0) return null;
+                    route.repo_members.confirm = action;
                 }
                 return route;
             }
@@ -1914,10 +1914,10 @@ pub const RoutablePage = union(enum) {
             .repo_repo_new => |a_name| std.mem.eql(u8, a_name.slice(), b.repo_repo_new.slice()),
             .repo_user_new => |a_name| std.mem.eql(u8, a_name.slice(), b.repo_user_new.slice()),
             .repo_settings => |a_name| std.mem.eql(u8, a_name.slice(), b.repo_settings.slice()),
-            .repo_roles => |a_r| std.mem.eql(u8, a_r.name.slice(), b.repo_roles.name.slice()) and
-                a_r.start == b.repo_roles.start and
-                std.mem.eql(u8, a_r.user.slice(), b.repo_roles.user.slice()) and
-                a_r.confirm == b.repo_roles.confirm,
+            .repo_members => |a_r| std.mem.eql(u8, a_r.name.slice(), b.repo_members.name.slice()) and
+                a_r.start == b.repo_members.start and
+                std.mem.eql(u8, a_r.user.slice(), b.repo_members.user.slice()) and
+                a_r.confirm == b.repo_members.confirm,
             .repo_user => |a_u| std.mem.eql(u8, a_u.name.slice(), b.repo_user.name.slice()) and a_u.tab.eql(b.repo_user.tab),
             .fork_patch => |a_f| std.mem.eql(u8, a_f.name.slice(), b.fork_patch.name.slice()) and std.mem.eql(u8, a_f.id.slice(), b.fork_patch.id.slice()),
             .fork_diff => |a_d| std.mem.eql(u8, a_d.fork.name.slice(), b.fork_diff.fork.name.slice()) and
@@ -2368,7 +2368,7 @@ pub const Session = struct {
             }
         };
 
-        pub const RolesFailure = enum { not_found, already_added };
+        pub const MembersFailure = enum { not_found, already_added };
 
         pub const AssignmentFailure = enum { not_found, not_an_email, already_assigned };
 
@@ -2455,8 +2455,8 @@ pub const Session = struct {
                 patch_role: ?evt.Repo.Role,
             },
         },
-        repo_roles: struct {
-            failure: RolesFailure,
+        repo_members: struct {
+            failure: MembersFailure,
             name: []const u8,
         },
         assignment: struct {

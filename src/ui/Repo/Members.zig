@@ -16,7 +16,7 @@ const wasm = builtin.target.cpu.arch == .wasm32;
 
 pub const page_size = 20;
 
-// the repo's owners and collaborators, which only its owners see
+// the repo's members, which only its owners see
 identity: []const u8,
 start: usize,
 next_start: ?usize = null,
@@ -81,9 +81,9 @@ pub fn init(
 
 // the confirmation of taking `name`'s role away
 fn confirmRoute(identity: []const u8, start: usize, name: []const u8, action: Action) !ui.RoutablePage {
-    var route = ui.RoutablePage.repoRolesRoute(identity, start) orelse return error.RouteTooLong;
-    route.repo_roles.user = ui.RoutablePage.Array(evt.User.name_max_len).from(name) orelse return error.RouteTooLong;
-    route.repo_roles.confirm = action;
+    var route = ui.RoutablePage.repoMembersRoute(identity, start) orelse return error.RouteTooLong;
+    route.repo_members.user = ui.RoutablePage.Array(evt.User.name_max_len).from(name) orelse return error.RouteTooLong;
+    route.repo_members.confirm = action;
     return route;
 }
 
@@ -98,7 +98,7 @@ pub fn perform(
     identity: []const u8,
     action: Action,
     name: []const u8,
-) !?ui.Session.FormFeedback.RolesFailure {
+) !?ui.Session.FormFeedback.MembersFailure {
     const owner_id = actor.repo_user_id orelse return error.NotFound;
     const parsed = ui.RoutablePage.RepoIdentity.parse(identity) orelse return error.NotFound;
     const user_id = (try evt.User.readIdByName(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, name)) orelse
@@ -115,7 +115,7 @@ pub fn perform(
     };
 
     switch (action) {
-        // a reader becomes a collaborator; anyone else with a role, and the
+        // a reader becomes a member; anyone else with a role, and the
         // creator, who holds no grant, is already added
         .grant => {
             const already_added = if (role) |held| held != .read else std.mem.eql(u8, &user_id, &owner_id);
@@ -137,7 +137,7 @@ pub fn perform(
 pub fn landingRoute(identity: []const u8, start: usize, actor: ui.Actor, action: Action, name: []const u8) ?ui.RoutablePage {
     const lost_ownership = (action == .revoke or action == .demote) and std.mem.eql(u8, name, actor.author.name);
     if (lost_ownership) return ui.RoutablePage.repoFilesRoute(identity, null, "", "", 0);
-    return ui.RoutablePage.repoRolesRoute(identity, start);
+    return ui.RoutablePage.repoMembersRoute(identity, start);
 }
 
 pub const View = struct {
@@ -152,7 +152,7 @@ pub const View = struct {
         if (data.confirm) |confirm| {
             const url = try (try confirmRoute(data.identity, data.start, confirm.name, confirm.action)).toUrl(session.page_arena);
             var center = try ui.widget.initConfirmationForm(allocator, try aa.print("form:{s}", .{url}), &.{.{
-                .label = if (confirm.action == .demote) "demote to collaborator" else "remove user",
+                .label = if (confirm.action == .demote) "demote to member" else "remove user",
                 .bottom_label = try aa.print(" {s} ", .{confirm.name}),
             }});
             errdefer center.deinit(allocator);
@@ -165,31 +165,42 @@ pub const View = struct {
 
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .vert });
         errdefer box.deinit(allocator);
-        const route = ui.RoutablePage.repoRolesRoute(data.identity, data.start) orelse return error.RouteTooLong;
+        const route = ui.RoutablePage.repoMembersRoute(data.identity, data.start) orelse return error.RouteTooLong;
         const url = try route.toUrl(session.page_arena);
 
         {
-            var add = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .horiz });
+            // the gap leaves a blank line between the text and the input
+            var add = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .vert, .gap = 1 });
             errdefer add.deinit(allocator);
             add.getFocus().kind = .{ .custom = try aa.print("form:{s}/grant", .{url}) };
-            var name = try wgt.TextInput.init(allocator, .{ .top_label = .{ .text = " add a collaborator " }, .name = "name", .visible_width = 30, .round_corners = true, .render_content = session.is_terminal });
+            {
+                var about = try ui.widget.RichText.init(allocator, &.{
+                    .{ .text = "members", .style = .{ .bold = true } },
+                    .{ .text = " can push to this repo.\n" },
+                    .{ .text = "owners", .style = .{ .bold = true } },
+                    .{ .text = " can add and remove members." },
+                });
+                errdefer about.deinit(allocator);
+                try add.children.put(allocator, about.getFocus().id, .{ .widget = .{ .rich_text = about }, .rect = null, .min_size = null });
+            }
+            var name = try wgt.TextInput.init(allocator, .{ .top_label = .{ .text = " add a member " }, .name = "name", .visible_width = 30, .round_corners = true, .render_content = session.is_terminal });
             errdefer name.deinit(allocator);
             name.getFocus().mode = .all;
-            if (session.formFeedback(.repo_roles)) |saved| try name.setContent(allocator, saved.name);
+            if (session.formFeedback(.repo_members)) |saved| try name.setContent(allocator, saved.name);
             add.getFocus().child_id = name.getFocus().id;
             try add.children.put(allocator, name.getFocus().id, .{ .widget = .{ .text_input = name }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
-            try box.children.put(allocator, add.getFocus().id, .{ .widget = .{ .box = add }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
+            try box.children.put(allocator, add.getFocus().id, .{ .widget = .{ .box = add }, .rect = null, .min_size = .{ .width = null, .height = 6 } });
         }
 
         // the user rows follow the add row in the same box
         if (data.start > 0) {
-            var previous = try Comment.linkBox(allocator, session, "← previous", ui.RoutablePage.repoRolesRoute(data.identity, data.start -| page_size) orelse return error.RouteTooLong);
+            var previous = try Comment.linkBox(allocator, session, "← previous", ui.RoutablePage.repoMembersRoute(data.identity, data.start -| page_size) orelse return error.RouteTooLong);
             errdefer previous.deinit(allocator);
             try box.children.put(allocator, previous.getFocus().id, .{ .widget = .{ .text_box = previous }, .rect = null, .min_size = null });
         }
         for (data.rows) |row| {
             var row_route = route;
-            row_route.repo_roles.user = ui.RoutablePage.Array(evt.User.name_max_len).from(row.name) orelse return error.RouteTooLong;
+            row_route.repo_members.user = ui.RoutablePage.Array(evt.User.name_max_len).from(row.name) orelse return error.RouteTooLong;
             const row_url = try row_route.toUrl(session.page_arena);
 
             var row_box = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .horiz });
@@ -199,13 +210,13 @@ pub const View = struct {
                 const user_route = ui.RoutablePage{ .user_repos = .{ .name = ui.RoutablePage.Array(evt.User.name_max_len).from(row.name) orelse return error.RouteTooLong } };
                 var name = try Comment.linkBox(allocator, session, row.name, user_route);
                 errdefer name.deinit(allocator);
-                name.options.bottom_label.text = if (row.role == .owner) " owner " else " collaborator ";
+                name.options.bottom_label.text = if (row.role == .owner) " owner " else " member ";
                 try row_box.children.put(allocator, name.getFocus().id, .{ .widget = .{ .text_box = name }, .rect = null, .min_size = null });
             }
             // taking a role away asks first
             if (row.role == .owner) {
                 const demote_route = try confirmRoute(data.identity, data.start, row.name, .demote);
-                try addButton(allocator, &row_box, "demote to collaborator", try aa.print("a:{s}", .{try demote_route.toUrl(session.page_arena)}));
+                try addButton(allocator, &row_box, "demote to member", try aa.print("a:{s}", .{try demote_route.toUrl(session.page_arena)}));
             } else try addButton(allocator, &row_box, "promote to owner", try aa.print("submit:{s}/promote", .{row_url}));
             {
                 const revoke_route = try confirmRoute(data.identity, data.start, row.name, .revoke);
@@ -219,7 +230,7 @@ pub const View = struct {
             try box.children.put(allocator, row_box.getFocus().id, .{ .widget = .{ .box = row_box }, .rect = null, .min_size = null });
         }
         if (data.next_start) |next_start| {
-            var next = try Comment.linkBox(allocator, session, "next →", ui.RoutablePage.repoRolesRoute(data.identity, next_start) orelse return error.RouteTooLong);
+            var next = try Comment.linkBox(allocator, session, "next →", ui.RoutablePage.repoMembersRoute(data.identity, next_start) orelse return error.RouteTooLong);
             errdefer next.deinit(allocator);
             try box.children.put(allocator, next.getFocus().id, .{ .widget = .{ .text_box = next }, .rect = null, .min_size = null });
         }
@@ -255,7 +266,7 @@ pub const View = struct {
     }
 
     fn nameInput(self: *View) *wgt.TextInput {
-        return &self.addBox().children.values()[0].widget.text_input;
+        return &self.addBox().children.values()[1].widget.text_input;
     }
 
     fn addActive(self: *View) bool {
@@ -276,11 +287,11 @@ pub const View = struct {
     // handling
     fn labelAddInput(self: *View, root_focus: *Focus) !void {
         const name = self.nameInput();
-        const failure = if (self.session.formFeedback(.repo_roles)) |saved| saved.failure else null;
+        const failure = if (self.session.formFeedback(.repo_members)) |saved| saved.failure else null;
         name.options.top_label.text = if (failure) |value| switch (value) {
-            .not_found => " add a collaborator (not found) ",
-            .already_added => " add a collaborator (already added) ",
-        } else " add a collaborator ";
+            .not_found => " add a member (not found) ",
+            .already_added => " add a member (already added) ",
+        } else " add a member ";
         name.options.bottom_label.text = if (root_focus.grandchild_id == name.getFocus().id) " press enter " else "";
         try self.session.text_inputs.put(self.session.arena.allocator(), name.getFocus().id, name);
     }
@@ -338,7 +349,7 @@ pub const View = struct {
             else => return err,
         };
         if (failure) |value| {
-            self.session.data.form_feedback = .{ .repo_roles = .{ .failure = value, .name = try self.session.arena.allocator().dupe(u8, name) } };
+            self.session.data.form_feedback = .{ .repo_members = .{ .failure = value, .name = try self.session.arena.allocator().dupe(u8, name) } };
             return;
         }
         try self.session.navigate(landingRoute(self.data.identity, self.data.start, actor, action, name) orelse return error.RouteTooLong);

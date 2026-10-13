@@ -173,10 +173,10 @@ fn handleRequest(
                             .addkey => handleUserKeyAdd(io, request, allocator, base, server.admin_repo_path, server.users_dir, server.session_store),
                             .removekey => handleUserKeyRemove(io, request, allocator, base, server.admin_repo_path, server.users_dir, server.session_store),
                             .settings => handleRepoSettings(io, request, allocator, path, host),
-                            .grant => handleRoles(io, request, allocator, base, host, .grant),
-                            .revoke => handleRoles(io, request, allocator, base, host, .revoke),
-                            .promote => handleRoles(io, request, allocator, base, host, .promote),
-                            .demote => handleRoles(io, request, allocator, base, host, .demote),
+                            .grant => handleMembers(io, request, allocator, base, host, .grant),
+                            .revoke => handleMembers(io, request, allocator, base, host, .revoke),
+                            .promote => handleMembers(io, request, allocator, base, host, .promote),
+                            .demote => handleMembers(io, request, allocator, base, host, .demote),
                             .new => handleNew(io, request, allocator, base, host),
                             .edit => handleEdit(io, request, allocator, base, host),
                             .remove => handleRemove(io, request, allocator, base, host),
@@ -760,17 +760,17 @@ fn handleRepoSettings(
     });
 }
 
-// act on a user's role in the repo the roles url `base` names, as one of its
+// act on a user's role in the repo the members url `base` names, as one of its
 // owners, then redirect back to the list. the add form names the user in its
 // body and the row forms in the url.
-fn handleRoles(io: std.Io, request: *std.http.Server.Request, allocator: std.mem.Allocator, base: []const u8, host: Host, action: ui.Repo.Roles.Action) !void {
+fn handleMembers(io: std.Io, request: *std.http.Server.Request, allocator: std.mem.Allocator, base: []const u8, host: Host, action: ui.Repo.Members.Action) !void {
     const server = switch (host) {
         .server => |server| server,
         .local => return respondRepoNotFound(request),
     };
     const route = routeFromUrl(host, base) orelse return respondRepoNotFound(request);
-    if (route != .repo_roles) return respondRepoNotFound(request);
-    const target = route.repo_roles;
+    if (route != .repo_members) return respondRepoNotFound(request);
+    const target = route.repo_members;
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const identity = target.name.slice();
@@ -789,16 +789,16 @@ fn handleRoles(io: std.Io, request: *std.http.Server.Request, allocator: std.mem
         var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = server.admin_repo_path });
         defer admin_repo.deinit(io, allocator);
         const moment = try evt.currentMoment(evt.admin_repo_opts, &admin_repo);
-        break :blk ui.Repo.Roles.perform(io, allocator, moment, server.users_dir, actor, identity, action, name) catch |err| switch (err) {
+        break :blk ui.Repo.Members.perform(io, allocator, moment, server.users_dir, actor, identity, action, name) catch |err| switch (err) {
             error.NotFound, error.EventNotFound => return respondRepoNotFound(request),
             else => return err,
         };
     };
     if (failure) |value| {
-        const location = try (ui.RoutablePage.repoRolesRoute(identity, target.start) orelse return error.RouteTooLong).toUrl(&arena);
-        return respondFormFailure(request, allocator, server.session_store, location, .{ .repo_roles = .{ .failure = value, .name = name } });
+        const location = try (ui.RoutablePage.repoMembersRoute(identity, target.start) orelse return error.RouteTooLong).toUrl(&arena);
+        return respondFormFailure(request, allocator, server.session_store, location, .{ .repo_members = .{ .failure = value, .name = name } });
     }
-    const location = try (ui.Repo.Roles.landingRoute(identity, target.start, actor, action, name) orelse return error.RouteTooLong).toUrl(&arena);
+    const location = try (ui.Repo.Members.landingRoute(identity, target.start, actor, action, name) orelse return error.RouteTooLong).toUrl(&arena);
     try request.respond("", .{ .status = .see_other, .keep_alive = false, .extra_headers = &.{.{ .name = "location", .value = location }} });
 }
 

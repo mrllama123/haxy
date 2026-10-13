@@ -12,7 +12,7 @@ const Key = xitui.input.Key;
 const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 
-const Roles = @import("./Roles.zig");
+const Members = @import("./Members.zig");
 
 const wasm = builtin.target.cpu.arch == .wasm32;
 
@@ -29,13 +29,14 @@ issue_role: ?evt.Repo.Role,
 patch_role: ?evt.Repo.Role,
 hash_kind: hash.HashKind,
 // the sub tab the route names
-view: enum { settings, roles },
-roles: Roles,
+view: enum { settings, members },
+members: Members,
 
 const Self = @This();
 
-// the tab role choices, in the order the form shows them
-const role_choices = [_]?evt.Repo.Role{ null, .owner, .write, .read };
+// the tab role choices, in the order the form shows them. no owners-only
+// choice, so anyone who can push may push events for every tab.
+const role_choices = [_]?evt.Repo.Role{ null, .write, .read };
 
 const role_labels = blk: {
     var labels: [role_choices.len][]const u8 = undefined;
@@ -46,8 +47,7 @@ const role_labels = blk: {
 pub fn roleLabel(role_maybe: ?evt.Repo.Role) []const u8 {
     const role = role_maybe orelse return "nobody";
     return switch (role) {
-        .owner => "owners",
-        .write => "collaborators",
+        .owner, .write => "members",
         .read => "anybody",
     };
 }
@@ -60,7 +60,7 @@ pub fn labelRole(label: []const u8) error{InvalidRole}!?evt.Repo.Role {
     return error.InvalidRole;
 }
 
-// the repo settings and user roles sub tabs over their content
+// the repo settings and members sub tabs over their content
 pub const View = struct {
     box: wgt.Box(ui.Widget),
 
@@ -75,11 +75,11 @@ pub const View = struct {
             var header = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .horiz });
             errdefer header.deinit(allocator);
             const on_tab = switch (session.data.current_page) {
-                .repo_settings, .repo_roles => true,
+                .repo_settings, .repo_members => true,
                 else => false,
             };
-            const routes = [_]?ui.RoutablePage{ ui.RoutablePage.repoSettingsRoute(data.identity), ui.RoutablePage.repoRolesRoute(data.identity, 0) };
-            for ([_]@FieldType(Self, "view"){ .settings, .roles }, [_][]const u8{ "repo settings", "user roles" }, routes) |view, label, route| {
+            const routes = [_]?ui.RoutablePage{ ui.RoutablePage.repoSettingsRoute(data.identity), ui.RoutablePage.repoMembersRoute(data.identity, 0) };
+            for ([_]@FieldType(Self, "view"){ .settings, .members }, [_][]const u8{ "repo settings", "members" }, routes) |view, label, route| {
                 var tab = try wgt.TextBox.init(allocator, label, .{ .border = .hidden, .round_corners = true, .wrap_kind = .none });
                 errdefer tab.deinit(allocator);
                 tab.getFocus().mode = .all;
@@ -100,9 +100,9 @@ pub const View = struct {
                 try stack.children.put(allocator, form.getFocus().id, .{ .repo_settings_form = form });
             }
             {
-                var roles = try Roles.View.init(allocator, &data.roles, session);
-                errdefer roles.deinit(allocator);
-                try stack.children.put(allocator, roles.getFocus().id, .{ .repo_roles = roles });
+                var members = try Members.View.init(allocator, &data.members, session);
+                errdefer members.deinit(allocator);
+                try stack.children.put(allocator, members.getFocus().id, .{ .repo_members = members });
             }
             stack.getFocus().child_id = stack.children.keys()[@backingInt(data.view)];
             try box.children.put(allocator, stack.getFocus().id, .{ .widget = .{ .stack = stack }, .rect = null, .min_size = null });

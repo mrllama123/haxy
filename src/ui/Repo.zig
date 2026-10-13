@@ -27,7 +27,7 @@ pub const Comment = @import("./Repo/Comment.zig");
 pub const Undo = @import("./Repo/Undo.zig");
 pub const Events = @import("./Repo/Events.zig");
 pub const Settings = @import("./Repo/Settings.zig");
-pub const Roles = @import("./Repo/Roles.zig");
+pub const Members = @import("./Repo/Members.zig");
 pub const Quit = @import("./Quit.zig");
 
 header: Header,
@@ -212,8 +212,8 @@ pub fn init(
         .repo_events => |*e| e.selected.slice(),
         else => "",
     };
-    const roles_route: ui.RoutablePage.RepoRolesRoute = switch (route) {
-        .repo_roles => |r| r,
+    const members_route: ui.RoutablePage.RepoMembersRoute = switch (route) {
+        .repo_members => |r| r,
         else => .{ .name = .{} },
     };
     // the thread the route shows, whose notif viewing it reads
@@ -325,8 +325,8 @@ pub fn init(
                                     .issue_role = repo.event.issue_role,
                                     .patch_role = repo.event.patch_role,
                                     .hash_kind = opened.self_repo_opts.hash,
-                                    .view = if (route == .repo_roles) .roles else .settings,
-                                    .roles = try Roles.init(io, gpa, arena, session.haxy_moment orelse return error.NoMoment, session.users_dir orelse return error.NoMoment, repo_identity.identity, &owner_id, &repo_id, roles_route.start, if (roles_route.confirm) |action| .{ .action = action, .name = roles_route.user.slice() } else null),
+                                    .view = if (route == .repo_members) .members else .settings,
+                                    .members = try Members.init(io, gpa, arena, session.haxy_moment orelse return error.NoMoment, session.users_dir orelse return error.NoMoment, repo_identity.identity, &owner_id, &repo_id, members_route.start, if (members_route.confirm) |action| .{ .action = action, .name = members_route.user.slice() } else null),
                                 };
                             }
                             // tabs switch in-page, so every tab's data is read here
@@ -390,7 +390,7 @@ pub fn init(
         };
     };
     if (route == .repo_undo and undo_data == null) return error.NotFound;
-    if ((route == .repo_settings or route == .repo_roles) and settings == null) return error.NotFound;
+    if ((route == .repo_settings or route == .repo_members) and settings == null) return error.NotFound;
     if (undo_data) |*undo| undo.clear = undo_clear;
     discussions.repo_source = source;
     issues.repo_source = source;
