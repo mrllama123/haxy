@@ -3,6 +3,7 @@ const xit = @import("xit");
 const rp = xit.repo;
 const hash = xit.hash;
 const evt = @import("event.zig");
+const progress = @import("progress.zig");
 
 const UserDB = evt.UserDB;
 const hash_kind = evt.user_repo_opts.hash;
@@ -12,14 +13,24 @@ const notif_map_key = "haxy/notif-id->notif";
 const recent_notif_id_set_key = "haxy/recent-notif-id-set";
 const unread_notif_id_set_key = "haxy/unread-notif-id-set";
 
-// the owner's user repo key holding each repo's newest moment index already notified
-const last_notified_map_key = "haxy/repo-id->last-notified-moment-index";
-
-// the owner's user repo key mapping each thread's notif id to its subscribers' user ids
-const subscriber_map_key = "haxy/notif-id->subscriber-id-set";
-
 // the most notifs a user keeps
 pub const max_notifs = 1000;
+
+// the most users a thread's capped tiers hold
+pub const max_commented = 250;
+pub const max_subscribed = 100;
+
+// the owner's user repo key mapping each thread's notif id to the user ids in
+// `mode`'s tier, and the most that tier holds. a mute has no tier.
+fn tierOf(comptime mode: evt.Notify.Mode) ?struct { map_key: []const u8, cap: ?u64 } {
+    const map_key = "haxy/notif-id->" ++ @tagName(mode) ++ "-id-set";
+    return switch (mode) {
+        .involved => .{ .map_key = map_key, .cap = null },
+        .commented => .{ .map_key = map_key, .cap = max_commented },
+        .subscribed => .{ .map_key = map_key, .cap = max_subscribed },
+        .muted => null,
+    };
+}
 
 // one thread's item in a user's inbox. the names and title are as of its last bump.
 pub const Notif = struct {
@@ -56,11 +67,7 @@ pub fn idOf(repo_id: *const [evt.event_id_size]u8, thread_id: *const [evt.event_
 fn transact(io: std.Io, allocator: std.mem.Allocator, users_dir: []const u8, user_id: *const [evt.event_id_size]u8, ctx: anytype) !void {
     var user_repo = (try evt.openUserRepo(io, allocator, users_dir, user_id)) orelse return error.NotFound;
     defer user_repo.deinit(io, allocator);
-    try transactIn(io, &user_repo, ctx);
-}
 
-// run `ctx` in a transaction on an open user repo
-fn transactIn(io: std.Io, user_repo: *rp.Repo(.xit, evt.user_repo_opts), ctx: anytype) !void {
     try user_repo.core.db_file.lock(io, .exclusive);
     defer user_repo.core.db_file.unlock(io);
 
@@ -227,7 +234,8 @@ pub fn unreadCount(moment: UserDB.HashMap(.read_only)) !u64 {
     return try (try UserDB.SortedSet(.read_only).init(unread_cursor)).count();
 }
 
-// always notify `user_id` of the thread `thread_id` in the repo at `location`
+// notify `user_id` of the thread `thread_id` in the repo at `location` by
+// choice, unless a tier already holds them or the subscribed tier is full
 pub fn subscribe(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -237,8 +245,15 @@ pub fn subscribe(
     thread_id: *const [evt.event_id_size]u8,
     author: evt.CommitAuthor,
 ) !void {
-    try writeMode(io, allocator, users_dir, user_id, &location, thread_id, .subscribe, author);
-    indexSubscriber(io, allocator, users_dir, location, thread_id, user_id, true);
+    {
+        var owner_repo = (try evt.openUserRepo(io, allocator, users_dir, &location.owner_id)) orelse return error.NotFound;
+        defer owner_repo.deinit(io, allocator);
+        const moment = try owner_repo.core.latestMoment();
+        const notif_id = idOf(&location.repo_id, thread_id);
+        if (try isNotified(moment, &notif_id, user_id)) return;
+        if (try tierFull(moment, &notif_id, .subscribed)) return;
+    }
+    try writeMode(io, allocator, users_dir, user_id, &location, thread_id, .subscribed, author);
 }
 
 // never notify `user_id` of the thread `thread_id` in the repo at `location`, dropping its notif
@@ -251,13 +266,12 @@ pub fn mute(
     thread_id: *const [evt.event_id_size]u8,
     author: evt.CommitAuthor,
 ) !void {
-    try writeMode(io, allocator, users_dir, user_id, &location, thread_id, .mute, author);
+    try writeMode(io, allocator, users_dir, user_id, &location, thread_id, .muted, author);
     try dismiss(io, allocator, users_dir, user_id, &idOf(&location.repo_id, thread_id));
-    indexSubscriber(io, allocator, users_dir, location, thread_id, user_id, false);
 }
 
-// write the user's notify event for a thread
-fn writeMode(
+// write the user's notify event for a thread, then move them to its tier in the owner's index
+pub fn writeMode(
     io: std.Io,
     allocator: std.mem.Allocator,
     users_dir: []const u8,
@@ -267,59 +281,64 @@ fn writeMode(
     mode: evt.Notify.Mode,
     author: evt.CommitAuthor,
 ) !void {
-    var user_repo = (try evt.openUserRepo(io, allocator, users_dir, user_id)) orelse return error.NotFound;
-    defer user_repo.deinit(io, allocator);
-    try evt.consume(.{ .server = .{ .users_dir = users_dir } }, .user, .xit, evt.user_repo_opts, io, allocator, &user_repo, evt.events_ref, &[_]evt.EventWithId{.{
-        .id = std.fmt.bytesToHex(evt.Notify.idOf(&location.repo_id, thread_id), .lower),
-        .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
-        .author = author,
-        .event = .{ .notify = .{
-            .owner_id = std.fmt.bytesToHex(location.owner_id, .lower),
-            .repo_id = std.fmt.bytesToHex(location.repo_id, .lower),
-            .thread_id = std.fmt.bytesToHex(thread_id.*, .lower),
-            .mode = mode,
-        } },
-    }});
+    {
+        var user_repo = (try evt.openUserRepo(io, allocator, users_dir, user_id)) orelse return error.NotFound;
+        defer user_repo.deinit(io, allocator);
+        try evt.consume(.{ .server = .{ .users_dir = users_dir } }, .user, .xit, evt.user_repo_opts, io, allocator, &user_repo, evt.events_ref, &[_]evt.EventWithId{.{
+            .id = std.fmt.bytesToHex(evt.Notify.idOf(&location.repo_id, thread_id), .lower),
+            .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
+            .author = author,
+            .event = .{ .notify = .{
+                .owner_id = std.fmt.bytesToHex(location.owner_id, .lower),
+                .repo_id = std.fmt.bytesToHex(location.repo_id, .lower),
+                .thread_id = std.fmt.bytesToHex(thread_id.*, .lower),
+                .mode = mode,
+            } },
+        }});
+    }
+    indexMode(io, allocator, users_dir, location, thread_id, user_id, mode);
 }
 
-// add `user_id` to the thread's subscribers in its repo owner's index, or remove
-// it, logging rather than returning a failure
-fn indexSubscriber(
+// move `user_id` to `mode`'s tier on the thread in its repo owner's index, or
+// out of every tier for a mute, logging rather than returning a failure
+fn indexMode(
     io: std.Io,
     allocator: std.mem.Allocator,
     users_dir: []const u8,
-    location: evt.RepoLocation,
+    location: *const evt.RepoLocation,
     thread_id: *const [evt.event_id_size]u8,
     user_id: *const [evt.event_id_size]u8,
-    subscribed: bool,
+    mode: evt.Notify.Mode,
 ) void {
     const Ctx = struct {
         notif_id: [evt.event_id_size]u8,
         user_id: *const [evt.event_id_size]u8,
-        subscribed: bool,
+        mode: evt.Notify.Mode,
 
         pub fn run(ctx: @This(), cursor: *UserDB.Cursor(.read_write)) !void {
             const moment = try UserDB.HashMap(.read_write).init(cursor.*);
-            const sets = try UserDB.HashMap(.read_write).init(try moment.putCursor(hash.hashInt(hash_kind, subscriber_map_key)));
-            const subscribers = try UserDB.SortedSet(.read_write).init(try sets.putCursor(hash.hashInt(hash_kind, &ctx.notif_id)));
-            if (ctx.subscribed) {
-                try subscribers.put(ctx.user_id);
-            } else if (!try subscribers.remove(ctx.user_id)) return error.CancelTransaction;
+            inline for (comptime std.enums.values(evt.Notify.Mode)) |tier_mode| {
+                if (comptime tierOf(tier_mode)) |tier| {
+                    const sets = try UserDB.HashMap(.read_write).init(try moment.putCursor(hash.hashInt(hash_kind, tier.map_key)));
+                    const users = try UserDB.SortedSet(.read_write).init(try sets.putCursor(hash.hashInt(hash_kind, &ctx.notif_id)));
+                    if (tier_mode == ctx.mode) try users.put(ctx.user_id) else _ = try users.remove(ctx.user_id);
+                }
+            }
         }
     };
 
     transact(io, allocator, users_dir, &location.owner_id, Ctx{
         .notif_id = idOf(&location.repo_id, thread_id),
         .user_id = user_id,
-        .subscribed = subscribed,
+        .mode = mode,
     }) catch |err| {
-        std.log.warn("failed to index thread subscriber: {s}", .{@errorName(err)});
+        std.log.warn("failed to index thread notify mode: {s}", .{@errorName(err)});
     };
 }
 
-// subscribe the users `events` show taking part in their threads, the threads'
-// authors, the commenters and the assignees, unless they hold a record on the
-// thread. logs rather than returning a failure.
+// put the users `events` show taking part in their threads in a tier, the
+// threads' authors and the assignees as involved and the commenters as
+// commented. logs rather than returning a failure.
 pub fn subscribeParticipants(io: std.Io, allocator: std.mem.Allocator, server: evt.Host.Server, repo_path: []const u8, events: []const evt.EventWithId) void {
     const admin_repo_path = server.admin_repo_path orelse return;
     const location = evt.parseRepoPath(server.users_dir, repo_path) orelse return;
@@ -336,121 +355,108 @@ fn subscribeEach(io: std.Io, allocator: std.mem.Allocator, users_dir: []const u8
     defer arena.deinit();
 
     for (events) |event| {
-        const thread_hex: [evt.event_id_size * 2]u8, const email: []const u8 = switch (event.event) {
-            inline .discuss, .issue, .patch => |thread| if (thread != null) .{ event.id, event.author.email } else continue,
-            .comment => |comment_maybe| if (comment_maybe) |comment| .{ comment.thread_id, event.author.email } else continue,
-            .assign => |assign_maybe| if (assign_maybe) |assign| .{ assign.thread_id, assign.email } else continue,
+        const thread_hex: [evt.event_id_size * 2]u8, const email: []const u8, const mode: evt.Notify.Mode = switch (event.event) {
+            inline .discuss, .issue, .patch => |thread| if (thread != null) .{ event.id, event.author.email, .involved } else continue,
+            .comment => |comment_maybe| if (comment_maybe) |comment| .{ comment.thread_id, event.author.email, .commented } else continue,
+            .assign => |assign_maybe| if (assign_maybe) |assign| .{ assign.thread_id, assign.email, .involved } else continue,
             else => continue,
         };
         const user_id = (try evt.User.readIdByEmail(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, email)) orelse continue;
         const thread_id = try evt.parseEventId(&thread_hex);
-        // a mute or an earlier subscribe stands
+        // a mute stands, and a record only ever moves up to involved
         {
             var user_repo = (try evt.openUserRepo(io, allocator, users_dir, &user_id)) orelse continue;
             defer user_repo.deinit(io, allocator);
             if (try evt.userMoment(&user_repo)) |moment| {
-                if (try evt.Notify.readMode(UserDB, hash_kind, moment, &arena, &location.repo_id, &thread_id) != null) continue;
+                if (try evt.Notify.readMode(UserDB, hash_kind, moment, &arena, &location.repo_id, &thread_id)) |existing| {
+                    if (mode != .involved or existing == .involved or existing == .muted) continue;
+                }
             }
         }
+        // a full commented tier takes nobody new, so a later comment checks again
+        if (mode == .commented) {
+            var owner_repo = (try evt.openUserRepo(io, allocator, users_dir, &location.owner_id)) orelse return error.NotFound;
+            defer owner_repo.deinit(io, allocator);
+            if (try tierFull(try owner_repo.core.latestMoment(), &idOf(&location.repo_id, &thread_id), .commented)) continue;
+        }
         // the write's own author, which for an assignment is the assigner
-        try subscribe(io, allocator, users_dir, &user_id, location, &thread_id, event.author);
+        try writeMode(io, allocator, users_dir, &user_id, &location, &thread_id, mode, event.author);
     }
 }
 
-// the thread `notif_id` names' subscriber set, or null before its first subscriber.
-// `moment` is its repo owner's user repo's latest.
-fn subscriberSet(moment: UserDB.HashMap(.read_only), notif_id: *const [evt.event_id_size]u8) !?UserDB.SortedSet(.read_only) {
-    const sets_cursor = try moment.getCursor(hash.hashInt(hash_kind, subscriber_map_key)) orelse return null;
-    const subscribers_cursor = try (try UserDB.HashMap(.read_only).init(sets_cursor)).getCursor(hash.hashInt(hash_kind, notif_id)) orelse return null;
-    return try UserDB.SortedSet(.read_only).init(subscribers_cursor);
+// the thread `notif_id` names' set under a tier's `map_key`, or null before its
+// first user. `moment` is its repo owner's user repo's latest.
+fn tierSet(moment: UserDB.HashMap(.read_only), notif_id: *const [evt.event_id_size]u8, map_key: []const u8) !?UserDB.SortedSet(.read_only) {
+    const sets_cursor = try moment.getCursor(hash.hashInt(hash_kind, map_key)) orelse return null;
+    const users_cursor = try (try UserDB.HashMap(.read_only).init(sets_cursor)).getCursor(hash.hashInt(hash_kind, notif_id)) orelse return null;
+    return try UserDB.SortedSet(.read_only).init(users_cursor);
 }
 
-// the users subscribed to the thread `notif_id` names. `moment` is its repo owner's user repo's latest.
-pub fn readSubscribers(moment: UserDB.HashMap(.read_only), arena: *std.heap.ArenaAllocator, notif_id: *const [evt.event_id_size]u8) ![]const [evt.event_id_size]u8 {
+// the users in the tiers of the thread `notif_id` names. `moment` is its repo owner's user repo's latest.
+pub fn readNotified(moment: UserDB.HashMap(.read_only), arena: *std.heap.ArenaAllocator, notif_id: *const [evt.event_id_size]u8) ![]const [evt.event_id_size]u8 {
     var user_ids: std.ArrayList([evt.event_id_size]u8) = .empty;
-    const subscribers = (try subscriberSet(moment, notif_id)) orelse return user_ids.items;
-    var iter = try subscribers.iteratorFromIndex(0);
-    while (try iter.next()) |kv_cursor| {
-        var cursor = kv_cursor;
-        const kv_pair = try cursor.readKeyValuePair();
-        var user_id: [evt.event_id_size]u8 = undefined;
-        _ = try kv_pair.key_cursor.readBytes(&user_id);
-        try user_ids.append(arena.allocator(), user_id);
+    inline for (comptime std.enums.values(evt.Notify.Mode)) |mode| {
+        if (comptime tierOf(mode)) |tier| {
+            if (try tierSet(moment, notif_id, tier.map_key)) |users| {
+                var iter = try users.iteratorFromIndex(0);
+                while (try iter.next()) |kv_cursor| {
+                    var cursor = kv_cursor;
+                    const kv_pair = try cursor.readKeyValuePair();
+                    var user_id: [evt.event_id_size]u8 = undefined;
+                    _ = try kv_pair.key_cursor.readBytes(&user_id);
+                    try user_ids.append(arena.allocator(), user_id);
+                }
+            }
+        }
     }
     return user_ids.items;
 }
 
-// whether `user_id` is subscribed to the thread `notif_id` names. `moment` is its repo owner's user repo's latest.
-pub fn isSubscribed(moment: UserDB.HashMap(.read_only), notif_id: *const [evt.event_id_size]u8, user_id: *const [evt.event_id_size]u8) !bool {
-    const subscribers = (try subscriberSet(moment, notif_id)) orelse return false;
-    return try subscribers.contains(user_id);
-}
-
-//
-// delivery worker
-//
-
-// repos with events the worker hasn't looked at, deduped
-pub const DirtyRepos = struct {
-    allocator: std.mem.Allocator,
-    mutex: std.Io.Mutex = .init,
-    // signaled when the set goes non-empty
-    condition: std.Io.Condition = .init,
-    set: std.AutoArrayHashMapUnmanaged(evt.RepoLocation, void) = .empty,
-
-    pub fn deinit(self: *DirtyRepos) void {
-        self.set.deinit(self.allocator);
-    }
-
-    pub fn mark(self: *DirtyRepos, io: std.Io, location: evt.RepoLocation) void {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        self.set.put(self.allocator, location, {}) catch |err| {
-            std.log.warn("failed to queue repo notifications: {s}", .{@errorName(err)});
-            return;
-        };
-        self.condition.signal(io);
-    }
-};
-
-// deliver notifs for each repo marked dirty, until canceled
-pub fn run(
-    dirty_repos: *DirtyRepos,
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    users_dir: []const u8,
-    admin_repo_path: []const u8,
-) std.Io.Cancelable!void {
-    while (true) {
-        var batch = blk: {
-            try dirty_repos.mutex.lock(io);
-            defer dirty_repos.mutex.unlock(io);
-            while (dirty_repos.set.count() == 0) try dirty_repos.condition.wait(io, &dirty_repos.mutex);
-            const batch = dirty_repos.set;
-            dirty_repos.set = .empty;
-            break :blk batch;
-        };
-        defer batch.deinit(dirty_repos.allocator);
-
-        for (batch.keys()) |location| {
-            notifyRepo(io, allocator, users_dir, admin_repo_path, location) catch |err| {
-                std.log.warn("failed to deliver notifications: {s}", .{@errorName(err)});
-            };
+// whether a tier of the thread `notif_id` names holds `user_id`. `moment` is its repo owner's user repo's latest.
+pub fn isNotified(moment: UserDB.HashMap(.read_only), notif_id: *const [evt.event_id_size]u8, user_id: *const [evt.event_id_size]u8) !bool {
+    inline for (comptime std.enums.values(evt.Notify.Mode)) |mode| {
+        if (comptime tierOf(mode)) |tier| {
+            if (try tierSet(moment, notif_id, tier.map_key)) |users| {
+                if (try users.contains(user_id)) return true;
+            }
         }
     }
+    return false;
 }
 
-pub fn notifyRepo(io: std.Io, allocator: std.mem.Allocator, users_dir: []const u8, admin_repo_path: []const u8, location: evt.RepoLocation) !void {
-    const path = try evt.repoPath(allocator, users_dir, &location.owner_id, &location.repo_id);
-    defer allocator.free(path);
-    var any_repo = try rp.AnyRepo(.xit, .{}).open(io, allocator, .{ .path = path, .require_repo_root = true });
-    defer any_repo.deinit(io, allocator);
-    switch (any_repo) {
-        inline else => |*repo| try notifyRepoEvents(repo.self_repo_opts, io, allocator, users_dir, admin_repo_path, location, repo),
-    }
+// whether `mode`'s tier on the thread `notif_id` names is at its cap. `moment` is its repo owner's user repo's latest.
+pub fn tierFull(moment: UserDB.HashMap(.read_only), notif_id: *const [evt.event_id_size]u8, comptime mode: evt.Notify.Mode) !bool {
+    const tier = comptime tierOf(mode) orelse @compileError("a mute has no tier");
+    const cap = tier.cap orelse return false;
+    const users = (try tierSet(moment, notif_id, tier.map_key)) orelse return false;
+    return try users.count() >= cap;
 }
 
-// a round's notifs, coalesced per user and thread
+//
+// delivery
+//
+
+// deliver the notifs of the comments and assignments the repo transaction at
+// `moment_index` created, logging rather than returning a failure.
+// `pusher_id` is the user who pushed it, if a push did.
+pub fn deliverTransaction(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    server: evt.Host.Server,
+    comptime repo_opts: rp.RepoOpts(.xit),
+    repo: *rp.Repo(.xit, repo_opts),
+    moment_index: u64,
+    pusher_id: ?*const [evt.event_id_size]u8,
+    progress_ctx_maybe: ?repo_opts.ProgressCtx,
+) void {
+    const admin_repo_path = server.admin_repo_path orelse return;
+    const location = evt.parseRepoPath(server.users_dir, repo.core.work_path) orelse return;
+    deliverEach(repo_opts, io, allocator, server.users_dir, admin_repo_path, location, repo, moment_index, pusher_id, progress_ctx_maybe) catch |err| {
+        std.log.warn("failed to deliver notifications: {s}", .{@errorName(err)});
+    };
+}
+
+// a transaction's notifs, coalesced per user and thread
 const Inboxes = struct {
     arena: *std.heap.ArenaAllocator,
     admin_moment: evt.AdminDB.HashMap(.read_only),
@@ -483,8 +489,7 @@ const Inboxes = struct {
     }
 };
 
-// deliver the comments and assignments created since the repo's cursor, then advance it
-fn notifyRepoEvents(
+fn deliverEach(
     comptime repo_opts: rp.RepoOpts(.xit),
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -492,140 +497,103 @@ fn notifyRepoEvents(
     admin_repo_path: []const u8,
     location: evt.RepoLocation,
     repo: *rp.Repo(.xit, repo_opts),
+    moment_index: u64,
+    pusher_id: ?*const [evt.event_id_size]u8,
+    progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !void {
     const DB = evt.EventDB(repo_opts.hash);
-    const haxy_moment = evt.currentMoment(repo_opts, repo) catch |err| switch (err) {
-        error.NotFound => return,
-        else => |e| return e,
-    };
-    const index_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.moment_index_key)) orelse return error.CursorNotFound;
-    const current = try index_cursor.readUint();
+    const haxy_moment = try evt.currentMoment(repo_opts, repo);
+    // the transaction's events, newest first
+    const ids = (try evt.momentEventIds(DB, repo_opts.hash, haxy_moment, moment_index)) orelse return;
 
     var owner_repo = (try evt.openUserRepo(io, allocator, users_dir, &location.owner_id)) orelse return;
     defer owner_repo.deinit(io, allocator);
-
-    // a missing cursor starts from the repo's first transaction, and a rewound history resets it
-    const first = if (try readLastNotified(&owner_repo, &location.repo_id)) |last| blk: {
-        if (current < last) return writeLastNotified(io, &owner_repo, &location.repo_id, current);
-        if (current == last) return;
-        break :blk last + 1;
-    } else 0;
+    const owner_moment = (try evt.userMoment(&owner_repo)) orelse return;
+    // the owner's plain data, which holds the tier index
+    const owner_latest = try owner_repo.core.latestMoment();
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    deliver: {
-        const owner_moment = (try evt.userMoment(&owner_repo)) orelse break :deliver;
-        // the owner's plain data, which holds the subscriber index
-        const owner_latest = try owner_repo.core.latestMoment();
-        const repo_record = (try evt.Repo.readById(UserDB, hash_kind, owner_moment, &arena, &location.repo_id)) orelse break :deliver;
-        if (repo_record.removed) break :deliver;
+    const repo_record = (try evt.Repo.readById(UserDB, hash_kind, owner_moment, &arena, &location.repo_id)) orelse return;
+    if (repo_record.removed) return;
 
-        var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = admin_repo_path });
-        defer admin_repo.deinit(io, allocator);
+    var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = admin_repo_path });
+    defer admin_repo.deinit(io, allocator);
 
-        const admin_moment = try evt.currentMoment(evt.admin_repo_opts, &admin_repo);
-        const owner = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &arena, &location.owner_id)) orelse break :deliver;
+    const admin_moment = try evt.currentMoment(evt.admin_repo_opts, &admin_repo);
+    const owner = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &arena, &location.owner_id)) orelse return;
 
-        var inboxes: Inboxes = .{
-            .arena = &arena,
-            .admin_moment = admin_moment,
-            .owner_moment = owner_moment,
-            .repo = repo_record,
-            .repo_id = &location.repo_id,
-        };
-
-        const kinds_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.event_index_key)) orelse return error.CursorNotFound;
-        const kinds = try DB.HashMap(.read_only).init(kinds_cursor);
-
-        // the events each transaction since the cursor consumed, newest first
-        var index = current + 1;
-        while (index > first) {
-            index -= 1;
-            const ids = (try evt.momentEventIds(DB, repo_opts.hash, haxy_moment, index)) orelse continue;
-            var iter = try ids.iteratorFromIndex(0);
-            while (try iter.next()) |kv_cursor| {
-                var cursor = kv_cursor;
-                const kv_pair = try cursor.readKeyValuePair();
-                var order_key: [@sizeOf(u64) + evt.event_id_size]u8 = undefined;
-                _ = try kv_pair.key_cursor.readBytes(&order_key);
-                const id = order_key[@sizeOf(u64)..].*;
-                const order = std.math.maxInt(u64) - std.mem.readInt(u64, order_key[0..@sizeOf(u64)], .big);
-
-                // edits keep the created order, so only creations notify
-                const Created = struct { thread_id: [evt.event_id_size * 2]u8, actor_email: ?[]const u8 };
-                const created: Created = switch ((try evt.readEventKind(repo_opts.hash, kinds, &id)) orelse continue) {
-                    inline .comment, .assign => |kind| blk: {
-                        const Fields = struct { removed: bool, author_email: ?[]const u8, created_order: u64, event: struct { thread_id: [evt.event_id_size * 2]u8 } };
-                        const T = if (kind == .comment) evt.Comment else evt.Assignment;
-                        const record = (try evt.readRecordSubset(T, Fields, DB, repo_opts.hash, haxy_moment, &arena, &id)) orelse continue;
-                        if (record.removed or record.created_order != order) continue;
-                        break :blk .{ .thread_id = record.event.thread_id, .actor_email = record.author_email };
-                    },
-                    else => continue,
-                };
-
-                const thread_id = try evt.parseEventId(&created.thread_id);
-                const Titled = struct { event: struct { title: []const u8 } };
-                const thread_kind = (try evt.readEventKind(repo_opts.hash, kinds, &thread_id)) orelse continue;
-                const thread = (switch (thread_kind) {
-                    .issue => try evt.readRecordSubset(evt.Issue, Titled, DB, repo_opts.hash, haxy_moment, &arena, &thread_id),
-                    .patch => try evt.readRecordSubset(evt.Patch, Titled, DB, repo_opts.hash, haxy_moment, &arena, &thread_id),
-                    .discuss => try evt.readRecordSubset(evt.Discussion, Titled, DB, repo_opts.hash, haxy_moment, &arena, &thread_id),
-                    else => null,
-                }) orelse continue;
-
-                const notif: Notif = .{
-                    .repo_id = location.repo_id,
-                    .owner_name = owner.event.name,
-                    .repo_name = repo_record.event.name,
-                    .thread_id = thread_id,
-                    .thread_kind = thread_kind,
-                    .title = thread.event.title,
-                    .last_child_id = id,
-                };
-
-                // subscribers hear of every comment and assignment but their own
-                const actor_id = if (created.actor_email) |email| try evt.User.readIdByEmail(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, email) else null;
-                for (try readSubscribers(owner_latest, &arena, &idOf(&location.repo_id, &thread_id))) |user_id| {
-                    if (actor_id) |actor| if (std.mem.eql(u8, &actor, &user_id)) continue;
-                    try inboxes.add(user_id, notif);
-                }
-            }
-        }
-
-        // a failure leaves the cursor, so the repo's next round redelivers
-        var failed = false;
-        for (inboxes.by_user.keys(), inboxes.by_user.values()) |*user_id, notifs| {
-            deliver(io, allocator, users_dir, user_id, notifs.items) catch |err| {
-                std.log.warn("failed to deliver notifications: {s}", .{@errorName(err)});
-                failed = true;
-            };
-        }
-        if (failed) return error.DeliveryFailed;
-    }
-
-    try writeLastNotified(io, &owner_repo, &location.repo_id, current);
-}
-
-fn readLastNotified(owner_repo: *rp.Repo(.xit, evt.user_repo_opts), repo_id: *const [evt.event_id_size]u8) !?u64 {
-    const map_cursor = try (try owner_repo.core.latestMoment()).getCursor(hash.hashInt(hash_kind, last_notified_map_key)) orelse return null;
-    const map = try UserDB.HashMap(.read_only).init(map_cursor);
-    const cursor = try map.getCursor(hash.hashInt(hash_kind, repo_id)) orelse return null;
-    return try cursor.readUint();
-}
-
-fn writeLastNotified(io: std.Io, owner_repo: *rp.Repo(.xit, evt.user_repo_opts), repo_id: *const [evt.event_id_size]u8, moment_index: u64) !void {
-    const Ctx = struct {
-        repo_id: *const [evt.event_id_size]u8,
-        moment_index: u64,
-
-        pub fn run(ctx: @This(), cursor: *UserDB.Cursor(.read_write)) !void {
-            const moment = try UserDB.HashMap(.read_write).init(cursor.*);
-            const map = try UserDB.HashMap(.read_write).init(try moment.putCursor(hash.hashInt(hash_kind, last_notified_map_key)));
-            try map.put(hash.hashInt(hash_kind, ctx.repo_id), .{ .uint = ctx.moment_index });
-        }
+    var inboxes: Inboxes = .{
+        .arena = &arena,
+        .admin_moment = admin_moment,
+        .owner_moment = owner_moment,
+        .repo = repo_record,
+        .repo_id = &location.repo_id,
     };
 
-    try transactIn(io, owner_repo, Ctx{ .repo_id = repo_id, .moment_index = moment_index });
+    const kinds_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.event_index_key)) orelse return error.CursorNotFound;
+    const kinds = try DB.HashMap(.read_only).init(kinds_cursor);
+
+    var iter = try ids.iteratorFromIndex(0);
+    while (try iter.next()) |kv_cursor| {
+        var cursor = kv_cursor;
+        const kv_pair = try cursor.readKeyValuePair();
+        var order_key: [@sizeOf(u64) + evt.event_id_size]u8 = undefined;
+        _ = try kv_pair.key_cursor.readBytes(&order_key);
+        const id = order_key[@sizeOf(u64)..].*;
+        const order = std.math.maxInt(u64) - std.mem.readInt(u64, order_key[0..@sizeOf(u64)], .big);
+
+        // edits keep the created order, so only creations notify
+        const Created = struct { thread_id: [evt.event_id_size * 2]u8, actor_email: ?[]const u8 };
+        const created: Created = switch ((try evt.readEventKind(repo_opts.hash, kinds, &id)) orelse continue) {
+            inline .comment, .assign => |kind| blk: {
+                const Fields = struct { removed: bool, author_email: ?[]const u8, created_order: u64, event: struct { thread_id: [evt.event_id_size * 2]u8 } };
+                const T = if (kind == .comment) evt.Comment else evt.Assignment;
+                const record = (try evt.readRecordSubset(T, Fields, DB, repo_opts.hash, haxy_moment, &arena, &id)) orelse continue;
+                if (record.removed or record.created_order != order) continue;
+                break :blk .{ .thread_id = record.event.thread_id, .actor_email = record.author_email };
+            },
+            else => continue,
+        };
+
+        const thread_id = try evt.parseEventId(&created.thread_id);
+        const Titled = struct { event: struct { title: []const u8 } };
+        const thread_kind = (try evt.readEventKind(repo_opts.hash, kinds, &thread_id)) orelse continue;
+        const thread = (switch (thread_kind) {
+            .issue => try evt.readRecordSubset(evt.Issue, Titled, DB, repo_opts.hash, haxy_moment, &arena, &thread_id),
+            .patch => try evt.readRecordSubset(evt.Patch, Titled, DB, repo_opts.hash, haxy_moment, &arena, &thread_id),
+            .discuss => try evt.readRecordSubset(evt.Discussion, Titled, DB, repo_opts.hash, haxy_moment, &arena, &thread_id),
+            else => null,
+        }) orelse continue;
+
+        const notif: Notif = .{
+            .repo_id = location.repo_id,
+            .owner_name = owner.event.name,
+            .repo_name = repo_record.event.name,
+            .thread_id = thread_id,
+            .thread_kind = thread_kind,
+            .title = thread.event.title,
+            .last_child_id = id,
+        };
+
+        // a user hears of no comment or assignment they made or pushed
+        const actor_id = if (created.actor_email) |email| try evt.User.readIdByEmail(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, email) else null;
+        for (try readNotified(owner_latest, &arena, &idOf(&location.repo_id, &thread_id))) |user_id| {
+            if (actor_id) |actor| if (std.mem.eql(u8, &actor, &user_id)) continue;
+            if (pusher_id) |pusher| if (std.mem.eql(u8, pusher, &user_id)) continue;
+            try inboxes.add(user_id, notif);
+        }
+    }
+
+    if (inboxes.by_user.count() == 0) return;
+    progress.report(repo_opts, io, progress_ctx_maybe, .{ .text = "Delivering notifications" });
+    progress.report(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .writing_patch, .estimated_total_items = inboxes.by_user.count() } });
+    for (inboxes.by_user.keys(), inboxes.by_user.values()) |*user_id, notifs| {
+        deliver(io, allocator, users_dir, user_id, notifs.items) catch |err| {
+            std.log.warn("failed to deliver notifications: {s}", .{@errorName(err)});
+        };
+        progress.report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .writing_patch });
+    }
+    progress.report(repo_opts, io, progress_ctx_maybe, .{ .end = .writing_patch });
 }

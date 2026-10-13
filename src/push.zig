@@ -13,6 +13,7 @@ const fork = @import("fork.zig");
 const serve_common = @import("serve_common.zig");
 const ssh = @import("serve_ssh_protocol.zig");
 const progress = @import("./progress.zig");
+const notify = @import("notify.zig");
 
 // prepare all reachable commits, including history received before patch
 // generation was enabled. this shares the receive-pack transaction.
@@ -116,6 +117,7 @@ pub fn receivePackAndConsume(
     writer: *std.Io.Writer,
     options: xit.net_server_receive_pack.Options,
     author: evt.CommitAuthor,
+    pusher_id: *const [evt.event_id_size]u8,
     server: evt.Host.Server,
     error_writer: *std.Io.Writer,
     sess: ?*ssh.SessionCtx,
@@ -130,6 +132,8 @@ pub fn receivePackAndConsume(
     defer updates.deinit();
 
     var sideband = progress.Sideband{ .response = &response, .writer = writer, .sess = sess };
+    // the moment index the pushed events were consumed into
+    var moment_index: ?u64 = null;
     const Ctx = struct {
         updates: *xit.net_server_receive_pack.AppliedRefUpdates,
         core: *rp.Repo(.xit, repo_opts).Core,
@@ -143,6 +147,7 @@ pub fn receivePackAndConsume(
         server: evt.Host.Server,
         error_writer: *std.Io.Writer,
         sideband: *progress.Sideband,
+        moment_index: *?u64,
 
         pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
             var moment = try DB.HashMap(.read_write).init(cursor.*);
@@ -159,7 +164,10 @@ pub fn receivePackAndConsume(
             // no-op consume must not cancel here, since the push shares the
             // transaction and must commit regardless.
             if (null != try rf.readRecur(.xit, repo_opts, state.readOnly(), ctx.io, .{ .ref = evt.events_ref })) {
-                _ = try evt.consumeInTransaction(.repo, .xit, repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, evt.events_ref);
+                ctx.moment_index.* = evt.consumeInTransaction(.repo, .xit, repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, evt.events_ref) catch |err| switch (err) {
+                    error.CancelTransaction => null,
+                    else => |e| return e,
+                };
                 try pch.detectMerged(repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, ctx.server.users_dir, ctx.updates.items.items, ctx.error_writer);
 
                 // the revisions the pushed branches cause belong to the push
@@ -199,6 +207,7 @@ pub fn receivePackAndConsume(
                 .server = server,
                 .error_writer = error_writer,
                 .sideband = &sideband,
+                .moment_index = &moment_index,
             },
         );
     };
@@ -207,6 +216,7 @@ pub fn receivePackAndConsume(
         if (err == error.CancelTransaction) return;
         return err;
     };
+    if (moment_index) |index| notify.deliverTransaction(io, allocator, server, repo_opts, repo, index, pusher_id, &sideband);
     evt.bumpRepoActivityAt(io, allocator, server, repo.core.work_path);
 
     pch.refreshBranches(.{ .server = server }, .xit, repo_opts, io, allocator, repo, updates.items.items, &sideband) catch |err| {
@@ -351,7 +361,7 @@ pub fn receiveFork(
                 // commit and index any new events
                 if (event_count > 0) {
                     try evt.commitEvents(.xit, repo_opts, state, ctx.io, ctx.allocator, evt.events_ref, events[0..event_count], null);
-                    if (!try evt.consumeInTransaction(.fork, .xit, repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, evt.events_ref)) return error.CancelTransaction;
+                    _ = try evt.consumeInTransaction(.fork, .xit, repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, evt.events_ref);
                 }
                 // the patch branch's file index lands with the push
                 _ = try find.refreshInTransaction(repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.sideband);

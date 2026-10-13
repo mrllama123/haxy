@@ -44,7 +44,6 @@ pub const Host = union(evt.HostKind) {
     server: struct {
         admin_repo_path: []const u8,
         users_dir: []const u8,
-        dirty_repos: *notify.DirtyRepos,
         session_store: SessionStore,
         git_http_port: ?u16,
         git_ssh_port: ?u16,
@@ -55,7 +54,7 @@ pub const Host = union(evt.HostKind) {
     pub fn event(self: Host) evt.Host {
         return switch (self) {
             .local => .local,
-            .server => |server| .{ .server = .{ .users_dir = server.users_dir, .dirty_repos = server.dirty_repos, .admin_repo_path = server.admin_repo_path } },
+            .server => |server| .{ .server = .{ .users_dir = server.users_dir, .admin_repo_path = server.admin_repo_path } },
         };
     }
 };

@@ -26,10 +26,17 @@ fn readMode(io: std.Io, allocator: std.mem.Allocator, arena: *std.heap.ArenaAllo
     return try evt.Notify.readMode(evt.UserDB, evt.user_repo_opts.hash, moment, arena, repo_id, thread_id);
 }
 
-fn readSubscribers(io: std.Io, allocator: std.mem.Allocator, arena: *std.heap.ArenaAllocator, users_dir: []const u8, owner_id: *const [evt.event_id_size]u8, notif_id: *const [evt.event_id_size]u8) ![]const [evt.event_id_size]u8 {
+fn readNotified(io: std.Io, allocator: std.mem.Allocator, arena: *std.heap.ArenaAllocator, users_dir: []const u8, owner_id: *const [evt.event_id_size]u8, notif_id: *const [evt.event_id_size]u8) ![]const [evt.event_id_size]u8 {
     var user_repo = (try evt.openUserRepo(io, allocator, users_dir, owner_id)) orelse return error.TestUnexpectedResult;
     defer user_repo.deinit(io, allocator);
-    return try notify.readSubscribers(try user_repo.core.latestMoment(), arena, notif_id);
+    return try notify.readNotified(try user_repo.core.latestMoment(), arena, notif_id);
+}
+
+fn initUserRepo(io: std.Io, allocator: std.mem.Allocator, users_dir: []const u8, user_id: *const [evt.event_id_size]u8) !void {
+    const path = try evt.userRepoPath(allocator, users_dir, user_id);
+    defer allocator.free(path);
+    var user_repo = try evt.initUserRepo(io, allocator, path);
+    defer user_repo.deinit(io, allocator);
 }
 
 test "notifs" {
@@ -49,12 +56,7 @@ test "notifs" {
     var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
     const owner_id = evt.EventWithId.randomId(prng.random());
     const recipient_id = evt.EventWithId.randomId(prng.random());
-    for ([_]*const [evt.event_id_size]u8{ &owner_id, &recipient_id }) |user_id| {
-        const path = try evt.userRepoPath(allocator, users_dir, user_id);
-        defer allocator.free(path);
-        var user_repo = try evt.initUserRepo(io, allocator, path);
-        defer user_repo.deinit(io, allocator);
-    }
+    for ([_]*const [evt.event_id_size]u8{ &owner_id, &recipient_id }) |user_id| try initUserRepo(io, allocator, users_dir, user_id);
     const location = try evt.createRepo(io, allocator, users_dir, &owner_id, author, "repo", "", .private, repo_opts.hash);
 
     //
@@ -124,20 +126,29 @@ test "notifs" {
 
     // subscribing replaces the mute record and indexes the subscriber in the owner's repo
     const id_b = notify.idOf(&location.repo_id, &thread_b);
-    try std.testing.expectEqual(.mute, try readMode(io, allocator, &arena, users_dir, &recipient_id, &location.repo_id, &thread_b));
+    try std.testing.expectEqual(.muted, try readMode(io, allocator, &arena, users_dir, &recipient_id, &location.repo_id, &thread_b));
     try notify.subscribe(io, allocator, users_dir, &recipient_id, location, &thread_b, author);
-    try std.testing.expectEqual(.subscribe, try readMode(io, allocator, &arena, users_dir, &recipient_id, &location.repo_id, &thread_b));
+    try std.testing.expectEqual(.subscribed, try readMode(io, allocator, &arena, users_dir, &recipient_id, &location.repo_id, &thread_b));
     try notify.deliver(io, allocator, users_dir, &recipient_id, &.{notif_b});
     try std.testing.expectEqual(1, (try readRecent(io, allocator, &arena, users_dir, &recipient_id)).len);
     {
-        const subscribers = try readSubscribers(io, allocator, &arena, users_dir, &owner_id, &id_b);
-        try std.testing.expectEqual(1, subscribers.len);
-        try std.testing.expectEqualSlices(u8, &recipient_id, &subscribers[0]);
+        const notified = try readNotified(io, allocator, &arena, users_dir, &owner_id, &id_b);
+        try std.testing.expectEqual(1, notified.len);
+        try std.testing.expectEqualSlices(u8, &recipient_id, &notified[0]);
     }
 
     // muting drops the subscriber from the index
     try notify.mute(io, allocator, users_dir, &recipient_id, location, &thread_b, author);
-    try std.testing.expectEqual(0, (try readSubscribers(io, allocator, &arena, users_dir, &owner_id, &id_b)).len);
+    try std.testing.expectEqual(0, (try readNotified(io, allocator, &arena, users_dir, &owner_id, &id_b)).len);
+
+    // a full subscribed tier refuses one more
+    for (0..notify.max_subscribed) |_| {
+        const user_id = evt.EventWithId.randomId(prng.random());
+        try initUserRepo(io, allocator, users_dir, &user_id);
+        try notify.subscribe(io, allocator, users_dir, &user_id, location, &thread_a, author);
+    }
+    try notify.subscribe(io, allocator, users_dir, &recipient_id, location, &thread_a, author);
+    try std.testing.expectEqual(null, try readMode(io, allocator, &arena, users_dir, &recipient_id, &location.repo_id, &thread_a));
 
     // past the cap, the oldest go. times tie within a second, so which one goes isn't checked.
     {

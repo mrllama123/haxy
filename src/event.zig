@@ -139,14 +139,13 @@ pub fn bumpRepoActivity(
     };
 }
 
-// bump the repo at `repo_path` to now and queue it for notifying, logging rather than returning a failure
+// bump the repo at `repo_path` to now, logging rather than returning a failure
 pub fn bumpRepoActivityAt(io: std.Io, allocator: std.mem.Allocator, server: Host.Server, repo_path: []const u8) void {
     const location = parseRepoPath(server.users_dir, repo_path) orelse return;
     const now: u64 = @intCast(std.Io.Timestamp.now(io, .real).toSeconds());
     bumpRepoActivity(io, allocator, server.users_dir, &location.owner_id, &location.repo_id, now) catch |err| {
         std.log.warn("failed to record repo activity: {s}", .{@errorName(err)});
     };
-    if (server.dirty_repos) |dirty_repos| dirty_repos.mark(io, location);
 }
 
 fn readActivityTime(moment: UserDB.HashMap(.read_only), repo_id: *const [event_id_size]u8) !?u64 {
@@ -425,9 +424,7 @@ pub const Host = union(HostKind) {
 
     pub const Server = struct {
         users_dir: []const u8,
-        // the notify worker's queue, null where no worker runs
-        dirty_repos: ?*notify.DirtyRepos = null,
-        // where repo writes resolve their participants to subscribe, null where they subscribe nobody
+        // where repo writes resolve their participants and recipients, null where they notify nobody
         admin_repo_path: ?[]const u8 = null,
     };
 };
@@ -665,6 +662,9 @@ pub fn consume(
     var resolved_remote_name: ?[]u8 = null;
     defer if (resolved_remote_name) |name| allocator.free(name);
 
+    // the moment index a xit repo's transaction consumed into
+    var moment_index: ?u64 = null;
+
     // a branch that only exists on a remote is consumed from its remote-tracking
     // ref, while commits go on the local branch, continuing from the remote tip
     // so a cloned repo's local branch stays connected to the server history
@@ -716,13 +716,14 @@ pub fn consume(
                 events: []const EventWithId,
                 checks: *pch.MergeCheckInputs(repo_opts),
                 first_parent_oids: ?[1][hash.hexLen(repo_opts.hash)]u8,
+                moment_index: *?u64,
 
                 pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
                     var moment = try DB.HashMap(.read_write).init(cursor.*);
                     const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
 
                     try commitEvents(.xit, repo_opts, state, ctx.io, ctx.allocator, ctx.ref, ctx.events, ctx.first_parent_oids);
-                    if (!try consumeInTransaction(role, .xit, repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, ctx.ref)) return error.CancelTransaction;
+                    ctx.moment_index.* = try consumeInTransaction(role, .xit, repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, ctx.ref);
                     _ = try ctx.checks.update(state, ctx.io, ctx.allocator);
                     try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action_kind = undo_action } });
                 }
@@ -740,6 +741,7 @@ pub fn consume(
                 .events = events,
                 .checks = &checks,
                 .first_parent_oids = first_parent_oids,
+                .moment_index = &moment_index,
             }) catch |err| switch (err) {
                 error.CancelTransaction => return,
                 else => |e| return e,
@@ -754,8 +756,9 @@ pub fn consume(
     }
 
     if (role == .repo and host == .server and events.len > 0) {
-        // before the bump queues the repo, so its worker round sees the new subscribers
+        // before delivering, so a new assignee hears of their assignment
         notify.subscribeParticipants(io, allocator, host.server, repo.core.work_path, events);
+        if (repo_kind == .xit) notify.deliverTransaction(io, allocator, host.server, repo_opts, repo, moment_index orelse unreachable, null, null);
         bumpRepoActivityAt(io, allocator, host.server, repo.core.work_path);
     }
 }
@@ -1026,7 +1029,7 @@ pub fn LocalEventDB(comptime hash_kind: hash.HashKind) type {
                 pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
                     var moment = try DB.HashMap(.read_write).init(cursor.*);
                     const state = rp.Repo(repo_kind, repo_opts).State(.read_write){ .core = &ctx.repo.core, .extra = .{} };
-                    if (!try consumeInTransaction(.repo, repo_kind, repo_opts, state, ctx.db, &moment, ctx.io, ctx.allocator, ctx.ref)) return error.CancelTransaction;
+                    _ = try consumeInTransaction(.repo, repo_kind, repo_opts, state, ctx.db, &moment, ctx.io, ctx.allocator, ctx.ref);
                 }
             };
 
@@ -1045,10 +1048,11 @@ pub fn LocalEventDB(comptime hash_kind: hash.HashKind) type {
     };
 }
 
-// consume the events on `ref` into the db `moment` writes to, returning false
-// if there was nothing to do. events are read from `state`'s repo, which
-// needn't be the repo backing the db — that's how a local (possibly
-// git-backed) repo's events land in a standalone db.
+// consume the events on `ref` into the db `moment` writes to, returning the
+// moment index they landed in, or null when it only rewound to a tip consumed
+// before. a tip already consumed cancels the transaction. events are read
+// from `state`'s repo, which needn't be the repo backing the db — that's how
+// a local (possibly git-backed) repo's events land in a standalone db.
 pub fn consumeInTransaction(
     comptime role: RepoRole,
     comptime repo_kind: rp.RepoKind,
@@ -1059,7 +1063,7 @@ pub fn consumeInTransaction(
     io: std.Io,
     allocator: std.mem.Allocator,
     ref: rf.Ref,
-) !bool {
+) !?u64 {
     const DB = EventDB(repo_opts.hash);
     const read_state = state.readOnly();
 
@@ -1076,7 +1080,7 @@ pub fn consumeInTransaction(
         const tip_hex = (try rf.readRecur(repo_kind, repo_opts, read_state, io, .{ .ref = ref })) orelse return error.OidNotFound;
         var tip: [hash.byteLen(repo_opts.hash)]u8 = undefined;
         _ = try std.fmt.hexToBytes(&tip, &tip_hex);
-        if (std.mem.eql(u8, last_object_id, &tip)) return false;
+        if (std.mem.eql(u8, last_object_id, &tip)) return error.CancelTransaction;
     }
 
     // the list with all of haxy's state, including materialized views.
@@ -1117,7 +1121,7 @@ pub fn consumeInTransaction(
 
         try haxy_history.slice(moment_index + 1);
         try moment.put(hash.hashInt(repo_opts.hash, last_object_id_key), .{ .bytes = &head_oid });
-        return true;
+        return null;
     }
 
     // if this branch was rebased and force pushed, we need to detect that and
@@ -1420,7 +1424,7 @@ pub fn consumeInTransaction(
         try moment.put(hash.hashInt(repo_opts.hash, last_object_id_key), .{ .bytes = last_object_id });
     }
 
-    return true;
+    return try haxy_history.count() - 1;
 }
 
 // the conflicted records of one kind, keyed by the same order key its id set

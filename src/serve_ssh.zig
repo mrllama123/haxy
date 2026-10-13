@@ -238,7 +238,6 @@ fn runTui(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySiz
     // let page builders open on-disk repos
     ui_session.io = io;
     ui_session.users_dir = handler.server.users_dir;
-    ui_session.dirty_repos = handler.server.dirty_repos;
     ui_session.ssh_key = try authorizedKeyLine(session_arena.allocator(), sess.public_key);
     try ui_session.logInWithSshKey();
 
@@ -414,7 +413,7 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, exec: ss
                 var sideband = progress.Sideband{ .writer = &writer.interface, .sess = sess };
                 try repo.uploadPack(io, allocator, &reader.interface, &writer.interface, .{ .protocol_version = protocol_version }, &sideband);
             },
-            .push => |pusher| try push.receivePackAndConsume(repo.self_repo_opts, io, allocator, repo, &reader.interface, &writer.interface, .{ .protocol_version = protocol_version, .protected_branches = pusher.protected_branches, .locked_branches = pusher.locked_branches }, pusher.author, handler.server, handler.err, sess),
+            .push => |pusher| try push.receivePackAndConsume(repo.self_repo_opts, io, allocator, repo, &reader.interface, &writer.interface, .{ .protocol_version = protocol_version, .protected_branches = pusher.protected_branches, .locked_branches = pusher.locked_branches }, pusher.author, &pusher.user_id, handler.server, handler.err, sess),
         },
     }
 }
@@ -452,7 +451,7 @@ fn runCreatingPush(
             var repo = try rp.Repo(.xit, any_repo_opts.toRepoOptsWithHash(kind)).open(io, allocator, .{ .path = repo_path });
             defer repo.deinit(io, allocator);
             // stateless since the advertisement already went out
-            try push.receivePackAndConsume(repo.self_repo_opts, io, allocator, &repo, reader, writer, .{ .protocol_version = protocol_version, .is_stateless = true }, creator.owner, handler.server, handler.err, sess);
+            try push.receivePackAndConsume(repo.self_repo_opts, io, allocator, &repo, reader, writer, .{ .protocol_version = protocol_version, .is_stateless = true }, creator.owner, &creator.owner_id, handler.server, handler.err, sess);
         },
     }
 }
@@ -557,6 +556,7 @@ const Allowed = union(enum) {
 
 // the key holder a push acts as
 const Pusher = struct {
+    user_id: [evt.event_id_size]u8,
     author: evt.CommitAuthor,
     protected_branches: []const []const u8,
     locked_branches: []const []const u8,
@@ -620,6 +620,7 @@ fn authorizeRepoKey(
                 // members change protected branches only by merging a patch
                 const owner = holder.role == .owner;
                 break :blk .{ .push = .{
+                    .user_id = holder.id,
                     .author = try commitAuthor(moment, arena, &holder.id),
                     .protected_branches = if (owner) names else &.{},
                     .locked_branches = if (owner) &.{} else names,

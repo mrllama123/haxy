@@ -11,10 +11,14 @@ thread_id: [evt.event_id_size * 2]u8,
 mode: Mode,
 
 pub const Mode = enum {
-    // always notified
-    subscribe,
+    // notified as the thread's author or an assignee
+    involved,
+    // notified as a commenter
+    commented,
+    // notified by choice
+    subscribed,
     // never notified
-    mute,
+    muted,
 };
 
 // what the db stores: the event's data plus the commit-derived fields

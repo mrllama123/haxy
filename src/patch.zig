@@ -11,6 +11,7 @@ const srch_cmmt = @import("search_commit.zig");
 const fork = @import("fork.zig");
 const serve_common = @import("serve_common.zig");
 const progress = @import("./progress.zig");
+const notify = @import("notify.zig");
 
 // the action a patch merge records
 pub const merge_undo_action = "haxy/merge";
@@ -94,7 +95,10 @@ pub fn writeBranchPatch(
             const history = try DB.ArrayList(.read_write).init(repo.core.db.rootCursor());
             try history.appendContext(.{ .slot = try history.getSlot(-1) }, Ctx{ .repo = repo, .io = io, .arena = &arena, .id = id, .patch = patch, .expected_patch = expected_patch, .author = author, .checks = &checks, .first_parent = first_parent });
         }
-        if (host == .server) evt.bumpRepoActivityAt(io, allocator, host.server, repo.core.work_path);
+        if (host == .server) {
+            notify.subscribeParticipants(io, allocator, host.server, repo.core.work_path, &.{.{ .id = id, .author = author, .event = .{ .patch = patch } }});
+            evt.bumpRepoActivityAt(io, allocator, host.server, repo.core.work_path);
+        }
     }
 }
 
@@ -128,7 +132,7 @@ pub fn writeBranchPatchInTransaction(
     {
         const parent = if (try rf.readRecur(.xit, repo_opts, state.readOnly(), io, .{ .ref = evt.events_ref }) == null) first_parent else null;
         try evt.commitEvents(.xit, repo_opts, state, io, arena.child_allocator, evt.events_ref, &events, parent);
-        if (!try evt.consumeInTransaction(.repo, .xit, repo_opts, state, &state.core.db, moment, io, arena.child_allocator, evt.events_ref)) return error.CancelTransaction;
+        _ = try evt.consumeInTransaction(.repo, .xit, repo_opts, state, &state.core.db, moment, io, arena.child_allocator, evt.events_ref);
     }
 
     // save mergeability before finishing the patch transaction
@@ -940,6 +944,12 @@ pub fn publish(
         if (existing == null) patch.status = .open;
 
         // write the published patch and its forker to the target repository
+        const events = &[_]evt.EventWithId{.{
+            .id = input.id,
+            .timestamp = input.timestamp,
+            .author = input.author,
+            .event = .{ .patch = patch },
+        }};
         {
             var checks: MergeCheckInputs(repo_opts) = .{};
             defer checks.deinit(io, allocator);
@@ -969,7 +979,7 @@ pub fn publish(
 
                     const parent = if (try rf.readRecur(.xit, repo_opts, state.readOnly(), ctx.io, .{ .ref = evt.events_ref }) == null) ctx.first_parent else null;
                     try evt.commitEvents(.xit, repo_opts, state, ctx.io, ctx.allocator, evt.events_ref, ctx.events, parent);
-                    if (!try evt.consumeInTransaction(.repo, .xit, repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, evt.events_ref)) return error.CancelTransaction;
+                    _ = try evt.consumeInTransaction(.repo, .xit, repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, evt.events_ref);
                     _ = try ctx.checks.update(state, ctx.io, ctx.allocator);
                     try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action_kind = evt.undo_action } });
                 }
@@ -983,12 +993,7 @@ pub fn publish(
                 .core = &target_repo.core,
                 .io = io,
                 .allocator = allocator,
-                .events = &.{.{
-                    .id = input.id,
-                    .timestamp = input.timestamp,
-                    .author = input.author,
-                    .event = .{ .patch = patch },
-                }},
+                .events = events,
                 .patch_id = patch_id,
                 .forker_id = std.fmt.bytesToHex(input.user_id, .lower),
                 .checks = &checks,
@@ -998,6 +1003,7 @@ pub fn publish(
                 else => |e| return e,
             };
         }
+        notify.subscribeParticipants(io, allocator, server, target_repo.core.work_path, events);
         evt.bumpRepoActivityAt(io, allocator, server, target_repo.core.work_path);
 
         // remove the consumed draft from the fork
@@ -1420,7 +1426,7 @@ fn importMergedRevision(
 
     // commit and consume the revision and patch events together.
     try evt.commitEvents(.xit, repo_opts, state, io, allocator, evt.events_ref, events.items, null);
-    if (!try evt.consumeInTransaction(.repo, .xit, repo_opts, state, db, moment, io, allocator, evt.events_ref)) return error.CancelTransaction;
+    _ = try evt.consumeInTransaction(.repo, .xit, repo_opts, state, db, moment, io, allocator, evt.events_ref);
     return true;
 }
 

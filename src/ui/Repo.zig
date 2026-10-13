@@ -443,7 +443,7 @@ fn readNotify(
     const gpa = arena.child_allocator;
 
     {
-        // the owner's plain data, which holds the subscriber index
+        // the owner's plain data, which holds the tier index
         var owner_repo = (try evt.openUserRepo(io, gpa, users_dir, owner_id)) orelse return error.NotFound;
         defer owner_repo.deinit(io, gpa);
         const owner_moment = try notify.latestMoment(&owner_repo);
@@ -479,10 +479,10 @@ fn setNotifyActions(
 ) !void {
     const items = try arena.allocator().dupe(std.meta.Elem(@TypeOf(window.items)), window.items);
     for (items) |*entry| {
-        const thread_id = try evt.parseEventId(entry.id);
-        // muting drops the user from the index, so membership alone decides
-        const subscribed = if (owner_moment) |moment| try notify.isSubscribed(moment, &notify.idOf(repo_id, &thread_id), user_id) else false;
-        entry.notify_action = if (subscribed) .mute else .subscribe;
+        const notif_id = notify.idOf(repo_id, &try evt.parseEventId(entry.id));
+        // muting drops the user from every tier, so membership alone decides
+        const notified = if (owner_moment) |moment| try notify.isNotified(moment, &notif_id, user_id) else false;
+        entry.notify_action = if (notified) .mute else .subscribe;
     }
     window.items = items;
 }

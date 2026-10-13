@@ -8,7 +8,6 @@ const serve_ssh_protocol = @import("./serve_ssh_protocol.zig");
 const serve_ssh = @import("./serve_ssh.zig");
 const serve_http = @import("./serve_http.zig");
 const evt = @import("./event.zig");
-const notify = @import("./notify.zig");
 
 pub const Options = struct {
     http_listen: ?[]const u8 = "127.0.0.1:8080",
@@ -83,10 +82,6 @@ pub fn run(
         defer admin_repo.deinit(io, allocator);
     }
 
-    // the repos the notify worker has yet to look at
-    var dirty_repos: notify.DirtyRepos = .{ .allocator = allocator };
-    defer dirty_repos.deinit();
-
     // create http listener
 
     const port_policy: PortPolicy = if (options.fallback_on_address_in_use) .fallback else .exact;
@@ -119,7 +114,7 @@ pub fn run(
             .host_key = try serve_ssh_protocol.HostKey.loadOrGenerate(io, allocator, data_dir_path),
             .session_handler = .{
                 .admin_repo_path = admin_repo_path,
-                .server = .{ .users_dir = users_dir, .dirty_repos = &dirty_repos },
+                .server = .{ .users_dir = users_dir, .admin_repo_path = admin_repo_path },
                 .wui_port = wui_server.socket.address.getPort(),
                 .git_http_port = git_http_port,
                 .git_ssh_port = ssh_port,
@@ -134,10 +129,6 @@ pub fn run(
 
     var tasks: std.Io.Group = .init;
     defer tasks.cancel(io);
-
-    tasks.concurrent(io, notify.run, .{ &dirty_repos, io, allocator, users_dir, admin_repo_path }) catch |spawn_err| {
-        serve_common.logError(io, err, "notify worker spawn failed: {s}\n", .{@errorName(spawn_err)});
-    };
 
     // run listeners, printing the ports actually bound
 
@@ -161,7 +152,6 @@ pub fn run(
     runWebListener(io, allocator, &wui_server, &tasks, .{ .server = .{
         .admin_repo_path = admin_repo_path,
         .users_dir = users_dir,
-        .dirty_repos = &dirty_repos,
         .session_store = session_store,
         .git_http_port = git_http_port,
         .git_ssh_port = git_ssh_port,

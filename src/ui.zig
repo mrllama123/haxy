@@ -18,7 +18,6 @@ const ansi_art = if (builtin.target.cpu.arch == .wasm32) struct {
     const not_found: []const u8 = "";
 } else @import("ansi_art");
 const evt = @import("./event.zig");
-const notify = @import("./notify.zig");
 const inp = @import("./ui/input.zig");
 
 pub const timestamp = @import("./ui/timestamp.zig");
@@ -2328,8 +2327,6 @@ pub const Session = struct {
     io: ?std.Io = null,
     admin_repo: ?*rp.Repo(.xit, evt.admin_repo_opts) = null,
     users_dir: ?[]const u8 = null,
-    // the notify worker's queue, null where no worker runs
-    dirty_repos: ?*notify.DirtyRepos = null,
     // the single on-disk repo this session views, when running in local mode
     // (haxy invoked with no arguments inside a repo). null on the server paths,
     // which resolve repos from the admin db instead.
@@ -2715,7 +2712,6 @@ pub const Session = struct {
             .local => .local,
             .server => .{ .server = .{
                 .users_dir = self.users_dir orelse unreachable,
-                .dirty_repos = self.dirty_repos,
                 .admin_repo_path = (self.admin_repo orelse unreachable).core.work_path,
             } },
         };

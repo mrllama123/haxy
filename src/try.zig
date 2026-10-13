@@ -942,15 +942,23 @@ pub fn main(init: std.process.Init) !void {
             }
         }
 
-        // seeding consumed locally, which subscribes nobody, so subscribe admin as the server
-        // would have, then deliver the notifications of its own repos the way the worker does
+        // seeding consumed locally, which notifies nobody, so involve admin in its threads as the
+        // server would have, then deliver each transaction of its own repos
         for (repo_data, repo_event_ids, 0..) |r, id_bytes, repo_index| {
             if (r.user_index != 0) continue;
             const location: evt.RepoLocation = .{ .owner_id = user_ids[r.user_index], .repo_id = id_bytes };
             // only the last repo has patches
             const thread_ids: []const [evt.event_id_size]u8 = if (repo_index + 1 == repo_data.len) &admin_thread_ids else admin_thread_ids[0..2];
-            for (thread_ids) |*thread_id| try notify.subscribe(io, allocator, users_dir, &admin_user_id, location, thread_id, .{ .name = user_data[0].name, .email = user_data[0].email });
-            try notify.notifyRepo(io, allocator, users_dir, work_path, location);
+            for (thread_ids) |*thread_id| try notify.writeMode(io, allocator, users_dir, &admin_user_id, &location, thread_id, .involved, .{ .name = user_data[0].name, .email = user_data[0].email });
+
+            const repo_path = try evt.repoPath(arena.allocator(), users_dir, &location.owner_id, &location.repo_id);
+            var target_repo = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = repo_path, .require_repo_root = true });
+            defer target_repo.deinit(io, allocator);
+            const index_cursor = try (try evt.currentMoment(.{}, &target_repo)).getCursor(hash.hashInt(.sha1, evt.moment_index_key)) orelse return error.CursorNotFound;
+            const current = try index_cursor.readUint();
+            for (0..current + 1) |moment_index| {
+                notify.deliverTransaction(io, allocator, .{ .users_dir = users_dir, .admin_repo_path = work_path }, .{}, &target_repo, moment_index, null, null);
+            }
         }
 
         break :blk try ui.Session.init(&session_arena, &repo, .{ .user_id = &admin_user_id });
