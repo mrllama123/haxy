@@ -357,7 +357,13 @@ pub const View = struct {
         if (session.data.host_kind == .server) {
             const label = ui.UserSettings.tabLabel(session);
             const count_label = try ui.UserSettings.tabBottomLabel(session);
-            var text_box = try wgt.TextBox.init(allocator, label, .{ .border = .single, .round_corners = true, .wrap_kind = .none, .bottom_label = .{ .text = count_label } });
+            // the viewer's role in this repo, when they can push to it
+            const role_label: []const u8 = if (page.handle.viewer) |viewer| switch (viewer.role) {
+                .owner => "(owner)",
+                .write => "(member)",
+                .read => "",
+            } else "";
+            var text_box = try wgt.TextBox.init(allocator, label, .{ .border = .single, .round_corners = true, .wrap_kind = .none, .top_label = .{ .text = role_label }, .bottom_label = .{ .text = count_label } });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().mode = .all;
             text_box.getFocus().kind = .{ .custom = user_link };
@@ -366,7 +372,7 @@ pub const View = struct {
             try tabs_box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
-                .min_size = .{ .width = @max(label.len, count_label.len) + 2, .height = null },
+                .min_size = .{ .width = @max(label.len, count_label.len, role_label.len) + 2, .height = null },
             });
         }
 
