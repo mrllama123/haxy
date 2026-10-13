@@ -182,6 +182,37 @@ pub fn markSelected(text_box: *wgt.TextBox, selected: bool) void {
     text_box.options.invert = selected;
 }
 
+// explanatory text atop a view's rows: a frame that takes focus like a row, so
+// the arrows scroll it into view, then a blank line
+pub fn initAbout(allocator: std.mem.Allocator, spans: []const RichText.Span) !wgt.Box(Widget) {
+    var row = try wgt.Box(Widget).init(allocator, .{ .border = null, .direction = .vert });
+    errdefer row.deinit(allocator);
+    {
+        var frame = try wgt.Box(Widget).init(allocator, .{ .border = .single, .round_corners = true, .direction = .vert, .top_label = .{ .text = " note " } });
+        errdefer frame.deinit(allocator);
+        frame.getFocus().mode = .all;
+        {
+            var text = try RichText.init(allocator, spans);
+            errdefer text.deinit(allocator);
+            try frame.children.put(allocator, text.getFocus().id, .{ .widget = .{ .rich_text = text }, .rect = null, .min_size = null });
+        }
+        row.getFocus().child_id = frame.getFocus().id;
+        try row.children.put(allocator, frame.getFocus().id, .{ .widget = .{ .box = frame }, .rect = null, .min_size = null });
+    }
+    {
+        var blank = try wgt.Text.init(allocator, " ");
+        errdefer blank.deinit(allocator);
+        try row.children.put(allocator, blank.getFocus().id, .{ .widget = .{ .text = blank }, .rect = null, .min_size = null });
+    }
+    return row;
+}
+
+// double the about frame's border while it has focus
+pub fn markAboutFocused(row: *wgt.Box(Widget), root_focus: *const Focus) void {
+    const frame = &row.children.values()[0].widget.box;
+    frame.options.border = if (root_focus.grandchild_id == frame.getFocus().id) .double else .single;
+}
+
 pub fn addBackButton(allocator: std.mem.Allocator, box: *wgt.Box(Widget), session: *ui.Session) !void {
     if (!session.is_terminal) return;
     var back = try wgt.TextBox.init(allocator, "←", .{ .border = .hidden, .wrap_kind = .none });
