@@ -257,14 +257,13 @@ fn pushRefs(arena: *std.heap.ArenaAllocator, identity: []const u8, payload: []co
 // resolving it names them as they are now, and leaves the email when no user
 // holds it, which is also what local mode sees with no admin db to read
 fn pushUser(arena: *std.heap.ArenaAllocator, haxy_moment: ?evt.AdminDB.HashMap(.read_only), payload: []const u8) !?DetailButton {
-    const Payload = struct { author: ?struct { email: []const u8 } = null };
+    const Payload = struct { author: struct { email: []const u8 } };
     const parsed = std.json.parseFromSlice(Payload, arena.child_allocator, payload, .{ .ignore_unknown_fields = true }) catch |err| switch (err) {
         error.OutOfMemory => return err,
         else => return null,
     };
     defer parsed.deinit();
-    const author = parsed.value.author orelse return null;
-    return switch (try ui.Author.initFromEmail(haxy_moment, arena, author.email)) {
+    return switch (try ui.Author.initFromEmail(haxy_moment, arena, parsed.value.author.email)) {
         .unknown => null,
         .email => |email| .{ .label = " user ", .text = email },
         .user_name => |name| .{ .label = " user ", .text = name, .link = try ui.userLink(arena, name) },

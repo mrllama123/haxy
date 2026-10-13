@@ -7,7 +7,6 @@ user_id: [evt.event_id_size * 2]u8,
 name: []const u8,
 description: []const u8,
 read_access: Access = .private,
-write_access: Access = .private,
 // the least role that may write in each tab, null turns the tab off
 discuss_role: ?Role = .read,
 issue_role: ?Role = .read,
@@ -76,9 +75,9 @@ pub fn threadRole(self: Self, kind: evt.EventKind) ?Role {
 }
 
 // the role `user_id_maybe` holds in the repo, or null when they hold none: its
-// creator owns it, and anyone else gets the higher of the base role and their
-// grant. `user_moment` is the owner's, which holds the grants. a null user is
-// logged out.
+// creator owns it, and anyone else gets their grant, else the base role.
+// `user_moment` is the owner's, which holds the grants. a null user is logged
+// out.
 pub fn roleOf(
     comptime DB: type,
     comptime hash_kind: hash.HashKind,
@@ -88,14 +87,13 @@ pub fn roleOf(
     repo_id: *const [evt.event_id_size]u8,
     user_id_maybe: ?[evt.event_id_size]u8,
 ) !?Role {
-    // what the access fields give everyone, logged in or not
-    const base_maybe: ?Role = if (record.event.write_access == .public) .write else if (record.event.read_access == .public) .read else null;
-    const user_id = user_id_maybe orelse return base_maybe;
+    // what read access gives everyone, logged in or not
+    const base: ?Role = if (record.event.read_access == .public) .read else null;
+    const user_id = user_id_maybe orelse return base;
     if (std.mem.eql(u8, &record.event.user_id, &std.fmt.bytesToHex(user_id, .lower))) return .owner;
 
-    const granted = (try evt.Grant.readRole(DB, hash_kind, user_moment, arena, repo_id, &user_id)) orelse return base_maybe;
-    const base = base_maybe orelse return granted;
-    return if (granted.atLeast(base)) granted else base;
+    // a grant is never below the base role
+    return (try evt.Grant.readRole(DB, hash_kind, user_moment, arena, repo_id, &user_id)) orelse base;
 }
 
 // the moment keys `evt.merge` reads and writes for this kind

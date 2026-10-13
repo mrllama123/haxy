@@ -49,7 +49,7 @@ pub fn writeUndo(
     state: rp.Repo(.xit, repo_opts).State(.read_write),
     io: std.Io,
     allocator: std.mem.Allocator,
-    author: ?evt.CommitAuthor,
+    author: evt.CommitAuthor,
     updates: []const xit.net_server_receive_pack.AppliedRefUpdate,
 ) !void {
     // what the payload may take up: the record holds a timestamp and the
@@ -60,11 +60,8 @@ pub fn writeUndo(
     defer arena.deinit();
     const aa = arena.allocator();
 
-    const author_json: std.json.ObjectMap = if (author) |user|
-        try .init(aa, &.{ "username", "email" }, &.{ .{ .string = user.name }, .{ .string = user.email } })
-    else
-        .empty;
-    var payload: std.json.ObjectMap = try .init(aa, &.{"author"}, &.{if (author != null) .{ .object = author_json } else .null});
+    const author_json: std.json.ObjectMap = try .init(aa, &.{ "username", "email" }, &.{ .{ .string = author.name }, .{ .string = author.email } });
+    var payload: std.json.ObjectMap = try .init(aa, &.{"author"}, &.{.{ .object = author_json }});
 
     // where each ref landed, so the undo tab can say what the push did to it.
     // an oid of all zeros means the ref has no side there, which is how a
@@ -118,7 +115,7 @@ pub fn receivePackAndConsume(
     reader: *std.Io.Reader,
     writer: *std.Io.Writer,
     options: xit.net_server_receive_pack.Options,
-    author: ?evt.CommitAuthor,
+    author: evt.CommitAuthor,
     server: evt.Host.Server,
     error_writer: *std.Io.Writer,
     sess: ?*ssh.SessionCtx,
@@ -141,7 +138,7 @@ pub fn receivePackAndConsume(
         reader: *std.Io.Reader,
         writer: *std.Io.Writer,
         options: xit.net_server_receive_pack.Options,
-        author: ?evt.CommitAuthor,
+        author: evt.CommitAuthor,
         response: *xit.net_server_receive_pack.Response,
         server: evt.Host.Server,
         error_writer: *std.Io.Writer,

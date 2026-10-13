@@ -135,15 +135,6 @@ test "repo undo visibility and fresh owner authorization" {
     Undo.handleRequest(allocator, &session, ui.RoutablePage.repoUndoRoute("alice:demo", 1).?.repo_undo);
     try std.testing.expectEqualStrings("Forbidden", session.data.undo_failure.?);
     try std.testing.expectEqual(null, session.next_page);
-
-    // public-write repos still require login for history and undo.
-    repo_event.user_id = std.fmt.bytesToHex(owner, .lower);
-    repo_event.write_access = .public;
-    try evt.consume(.{ .server = .{ .users_dir = users_dir } }, .user, .xit, evt.user_repo_opts, io, allocator, &user_repo, evt.events_ref, &.{.{ .id = std.fmt.bytesToHex(repo_id, .lower), .author = author, .event = .{ .repo = repo_event } }});
-    var anonymous = try ui.Session.init(&arena, &admin, .{});
-    anonymous.io = io;
-    anonymous.users_dir = users_dir;
-    try std.testing.expectError(error.NotFound, ui.Repo.init(&arena, &anonymous, ui.RoutablePage.repoUndoRoute("alice:demo", null).?));
 }
 
 test "local git has no undo and local xit can undo and refresh" {

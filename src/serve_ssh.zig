@@ -409,12 +409,12 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, exec: ss
     defer any_repo.deinit(io, allocator);
 
     switch (any_repo) {
-        inline else => |*repo| switch (parsed.service) {
-            .upload_pack => {
+        inline else => |*repo| switch (allowed) {
+            .fetch => {
                 var sideband = progress.Sideband{ .writer = &writer.interface, .sess = sess };
                 try repo.uploadPack(io, allocator, &reader.interface, &writer.interface, .{ .protocol_version = protocol_version }, &sideband);
             },
-            .receive_pack => try push.receivePackAndConsume(repo.self_repo_opts, io, allocator, repo, &reader.interface, &writer.interface, .{ .protocol_version = protocol_version, .protected_branches = allowed.protected_branches }, allowed.author, handler.server, handler.err, sess),
+            .push => |pusher| try push.receivePackAndConsume(repo.self_repo_opts, io, allocator, repo, &reader.interface, &writer.interface, .{ .protocol_version = protocol_version, .protected_branches = pusher.protected_branches }, pusher.author, handler.server, handler.err, sess),
         },
     }
 }
@@ -549,10 +549,15 @@ fn parseGitCommand(allocator: std.mem.Allocator, command: []const u8) !ParsedGit
 
 const RepoAuthorization = union(enum) { allowed: Allowed, create: RepoCreator, denied, not_found };
 
-// a key allowed into an existing repo
-const Allowed = struct {
-    // null when the repo's base role let the key in
-    author: ?evt.CommitAuthor,
+// what a key may do in an existing repo
+const Allowed = union(enum) {
+    fetch,
+    push: Pusher,
+};
+
+// the key holder a push acts as
+const Pusher = struct {
+    author: evt.CommitAuthor,
     protected_branches: []const []const u8,
 };
 
@@ -592,18 +597,22 @@ fn authorizeRepoKey(
         .upload_pack => .read,
         .receive_pack => .write,
     };
-    const protected_branches = try repo.repo.event.protectedBranchNames(arena.allocator());
-    // skip the key lookups when the base role is enough
-    if (repo.role) |base| {
-        if (base.atLeast(min_role)) return .{ .allowed = .{ .author = null, .protected_branches = protected_branches } };
-    }
+    // any key may fetch a public repo; a push always needs a key holder
+    if (service == .upload_pack and repo.role != null) return .{ .allowed = .fetch };
 
     // a key can be shared, so a holder whose role falls short doesn't end the search
     const owner_id = try evt.parseEventId(&repo.repo.event.user_id);
     for (try evt.User.readIdsByFingerprint(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, fingerprint)) |holder_id| {
         const seen = (try evt.readRepoById(io, allocator, arena, users_dir, &owner_id, &repo.event_id, holder_id)) orelse return .not_found;
         const role = seen.role orelse continue;
-        if (role.atLeast(min_role)) return .{ .allowed = .{ .author = try commitAuthor(moment, arena, &holder_id), .protected_branches = protected_branches } };
+        if (!role.atLeast(min_role)) continue;
+        return .{ .allowed = switch (service) {
+            .upload_pack => .fetch,
+            .receive_pack => .{ .push = .{
+                .author = try commitAuthor(moment, arena, &holder_id),
+                .protected_branches = try repo.repo.event.protectedBranchNames(arena.allocator()),
+            } },
+        } };
     }
     return .denied;
 }
