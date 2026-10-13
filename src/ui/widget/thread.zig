@@ -490,7 +490,7 @@ pub fn countLabel(session: *ui.Session, win: anytype) ![]const u8 {
 // the common sub-header used by each thread page: the search box, then the
 // tab strip
 pub const Header = struct {
-    box: wgt.Box(Widget),
+    scroll: widget.HeaderScroll,
     // focus id -> semantic stack index; some pages omit unavailable tabs
     tab_ids: std.AutoArrayHashMapUnmanaged(usize, usize),
     // the tab whose view the stack shows. focus lands on the search box too,
@@ -501,8 +501,9 @@ pub const Header = struct {
     const search_index: usize = 0;
 
     pub fn init(allocator: std.mem.Allocator, session: *ui.Session, search: ?[]const u8, search_label: []const u8) !Header {
-        var box = try wgt.Box(Widget).init(allocator, .{ .border = null, .direction = .horiz });
-        errdefer box.deinit(allocator);
+        var scroll = try widget.HeaderScroll.init(allocator, session);
+        errdefer scroll.deinit(allocator);
+        const box = scroll.row();
 
         {
             var search_box = try widget.SearchBox.init(allocator, session, search_label, "search", search);
@@ -511,7 +512,7 @@ pub const Header = struct {
             try box.children.put(allocator, search_box.getFocus().id, .{ .widget = .{ .search_box = search_box }, .rect = null, .min_size = widget.SearchBox.min_size });
         }
 
-        return .{ .box = box, .tab_ids = .empty };
+        return .{ .scroll = scroll, .tab_ids = .empty };
     }
 
     pub fn addTab(self: *Header, allocator: std.mem.Allocator, label: []const u8, bottom_label: []const u8, link: []const u8, view_index: usize) !void {
@@ -520,7 +521,7 @@ pub const Header = struct {
         text_box.getFocus().mode = .all;
         text_box.getFocus().kind = .{ .custom = link };
         try self.tab_ids.put(allocator, text_box.getFocus().id, view_index);
-        try self.box.children.put(allocator, text_box.getFocus().id, .{
+        try self.scroll.row().children.put(allocator, text_box.getFocus().id, .{
             .widget = .{ .text_box = text_box },
             .rect = null,
             .min_size = .{ .width = @max(label.len, bottom_label.len) + 2, .height = null },
@@ -537,7 +538,7 @@ pub const Header = struct {
     }
 
     pub fn deinit(self: *Header, allocator: std.mem.Allocator) void {
-        self.box.deinit(allocator);
+        self.scroll.deinit(allocator);
         self.tab_ids.deinit(allocator);
     }
 
@@ -548,7 +549,8 @@ pub const Header = struct {
         if (self.currentTabIndex()) |tab| self.selected_tab = tab;
         // only the selected tab shows its border
         const selected_id = if (self.selectedTab()) |tab| self.tab_ids.keys()[tab] else null;
-        for (self.box.children.keys(), self.box.children.values()) |id, *child| {
+        const row = self.scroll.row();
+        for (row.children.keys(), row.children.values()) |id, *child| {
             switch (child.widget) {
                 .text_box => |*tb| widget.markSelected(tb, selected_id == id),
                 else => {},
@@ -558,12 +560,12 @@ pub const Header = struct {
         // parent sets no min, which would make it lay the focused content out first.
         var header_constraint = constraint;
         header_constraint.min_size.height = @max(constraint.min_size.height orelse 0, 4);
-        try self.box.build(allocator, header_constraint, root_focus);
+        try self.scroll.build(allocator, header_constraint, root_focus);
     }
 
     pub fn input(self: *Header, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
         const search_box = self.searchBox();
-        if (self.box.getFocus().child_id == search_box.getFocus().id) {
+        if (self.scroll.row().getFocus().child_id == search_box.getFocus().id) {
             // tab, and right-arrow past the last character, step to the tabs
             if (key == .tab or (key == .arrow_right and search_box.atEnd())) {
                 root_focus.setFocus(self.tab_ids.keys()[0]);
@@ -587,24 +589,24 @@ pub const Header = struct {
     // caller owns the returned text.
     pub fn submittedText(self: *Header, allocator: std.mem.Allocator) !?[]u8 {
         const search_box = self.searchBox();
-        if (self.box.getFocus().child_id != search_box.getFocus().id) return null;
+        if (self.scroll.row().getFocus().child_id != search_box.getFocus().id) return null;
         return try search_box.text(allocator);
     }
 
     fn searchBox(self: *Header) *widget.SearchBox {
-        return &self.box.children.values()[search_index].widget.search_box;
+        return &self.scroll.row().children.values()[search_index].widget.search_box;
     }
 
     pub fn clearGrid(self: *Header) void {
-        self.box.clearGrid();
+        self.scroll.clearGrid();
     }
 
     pub fn getGrid(self: Header) ?Grid {
-        return self.box.getGrid();
+        return self.scroll.getGrid();
     }
 
     pub fn getFocus(self: *Header) *Focus {
-        return self.box.getFocus();
+        return self.scroll.getFocus();
     }
 
     pub fn getSelectedIndex(self: Header) ?usize {
@@ -618,7 +620,7 @@ pub const Header = struct {
     }
 
     fn currentTabIndex(self: Header) ?usize {
-        const child_id = self.box.focus.child_id orelse return null;
+        const child_id = self.scroll.row().focus.child_id orelse return null;
         return self.tab_ids.getIndex(child_id);
     }
 };

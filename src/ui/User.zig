@@ -387,8 +387,9 @@ pub const ReposView = struct {
         errdefer box.deinit(allocator);
 
         {
-            var header = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .horiz });
-            errdefer header.deinit(allocator);
+            var header_scroll = try ui.widget.HeaderScroll.init(allocator, session);
+            errdefer header_scroll.deinit(allocator);
+            const header = header_scroll.row();
             {
                 var search_box = try ui.widget.SearchBox.init(allocator, session, " search ", "search", data.repos_search);
                 errdefer search_box.deinit(allocator);
@@ -401,7 +402,7 @@ pub const ReposView = struct {
                 errdefer spacer.deinit(allocator);
                 try header.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
             }
-            try box.children.put(allocator, header.getFocus().id, .{ .widget = .{ .box = header }, .rect = null, .min_size = .{ .width = null, .height = ui.widget.SearchBox.min_size.height } });
+            try box.children.put(allocator, header_scroll.getFocus().id, .{ .widget = .{ .header_scroll = header_scroll }, .rect = null, .min_size = .{ .width = null, .height = ui.widget.SearchBox.min_size.height } });
         }
 
         // an empty first window has no rows, not even paging ones
@@ -494,7 +495,7 @@ pub const ReposView = struct {
     }
 
     fn searchBox(self: *ReposView) *ui.widget.SearchBox {
-        return &self.box.children.values()[header_index].widget.box.children.values()[0].widget.search_box;
+        return &self.box.children.values()[header_index].widget.header_scroll.row().children.values()[0].widget.search_box;
     }
 
     fn listScroll(self: *ReposView) *ui.widget.FlowBox.Scroll {

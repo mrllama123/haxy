@@ -709,7 +709,7 @@ pub const Header = struct {
     }
 
     pub const View = struct {
-        box: wgt.Box(ui.Widget),
+        scroll: ui.widget.HeaderScroll,
         session: *ui.Session,
         tab_ids: [2]usize,
         // the tab stays selected while the sync button has focus
@@ -717,8 +717,9 @@ pub const Header = struct {
         button_id: ?usize,
 
         pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !Header.View {
-            var box = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .horiz });
-            errdefer box.deinit(allocator);
+            var scroll = try ui.widget.HeaderScroll.init(allocator, session);
+            errdefer scroll.deinit(allocator);
+            const box = scroll.row();
             var tab_ids: [2]usize = undefined;
             const view_labels = [_][]const u8{ active_tab_label, removed_tab_label };
             inline for ([_]ui.RoutablePage.EventsView{ .active, .removed }, view_labels, 0..) |view, view_label, i| {
@@ -748,7 +749,7 @@ pub const Header = struct {
                 button.getFocus().mode = .all;
                 button.getFocus().kind = .{ .custom = "submit" };
                 button_id = button.getFocus().id;
-                try box.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = null });
+                try box.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = "sync".len + 2, .height = null } });
             }
 
             if (data.header.sync_status) |status_text| {
@@ -757,29 +758,29 @@ pub const Header = struct {
                 try box.children.put(allocator, status.getFocus().id, .{ .widget = .{ .text_box = status }, .rect = null, .min_size = null, .flex = .shrink });
             }
             box.getFocus().child_id = tab_ids[@backingInt(data.view)];
-            return .{ .box = box, .session = session, .tab_ids = tab_ids, .selected_tab = @backingInt(data.view), .button_id = button_id };
+            return .{ .scroll = scroll, .session = session, .tab_ids = tab_ids, .selected_tab = @backingInt(data.view), .button_id = button_id };
         }
 
         pub fn deinit(self: *Header.View, allocator: std.mem.Allocator) void {
-            self.box.deinit(allocator);
+            self.scroll.deinit(allocator);
         }
 
         pub fn build(self: *Header.View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
             self.clearGrid();
             if (self.getSelectedIndex()) |index| self.selected_tab = index;
             for (self.tab_ids, 0..) |id, index| {
-                const child = self.box.children.getPtr(id) orelse continue;
+                const child = self.scroll.row().children.getPtr(id) orelse continue;
                 const tab = switch (child.widget) {
                     .text_box => |*text_box| text_box,
                     else => continue,
                 };
                 ui.widget.markSelected(tab, index == self.selected_tab);
             }
-            try self.box.build(allocator, constraint, root_focus);
+            try self.scroll.build(allocator, constraint, root_focus);
         }
 
         pub fn input(self: *Header.View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
-            const selected = self.box.getFocus().child_id orelse return;
+            const selected = self.scroll.row().getFocus().child_id orelse return;
             const stops = [_]?usize{ self.tab_ids[0], self.tab_ids[1], self.button_id };
             const count = 2 + @as(usize, @intFromBool(self.button_id != null));
             const current = std.mem.indexOfScalar(?usize, stops[0..count], selected) orelse return;
@@ -798,7 +799,7 @@ pub const Header = struct {
             if (!self.session.is_terminal) return;
             if (self.session.host_request != null) return;
             const button_id = self.button_id orelse return;
-            const child = self.box.children.getPtr(button_id) orelse return;
+            const child = self.scroll.row().children.getPtr(button_id) orelse return;
             const button = switch (child.widget) {
                 .text_box => |*button| button,
                 else => return,
@@ -809,28 +810,28 @@ pub const Header = struct {
 
         fn syncFocused(self: *Header.View) bool {
             const button_id = self.button_id orelse return false;
-            return self.box.getFocus().child_id == button_id;
+            return self.scroll.row().getFocus().child_id == button_id;
         }
 
         pub fn getSelectedIndex(self: *Header.View) ?usize {
-            const id = self.box.getFocus().child_id orelse return null;
+            const id = self.scroll.row().getFocus().child_id orelse return null;
             return std.mem.indexOfScalar(usize, &self.tab_ids, id);
         }
 
         pub fn focusCurrent(self: *Header.View, root_focus: *Focus) void {
-            root_focus.setFocus(self.box.getFocus().child_id orelse self.tab_ids[0]);
+            root_focus.setFocus(self.scroll.row().getFocus().child_id orelse self.tab_ids[0]);
         }
 
         pub fn clearGrid(self: *Header.View) void {
-            self.box.clearGrid();
+            self.scroll.clearGrid();
         }
 
         pub fn getGrid(self: Header.View) ?Grid {
-            return self.box.getGrid();
+            return self.scroll.getGrid();
         }
 
         pub fn getFocus(self: *Header.View) *Focus {
-            return self.box.getFocus();
+            return self.scroll.getFocus();
         }
     };
 };

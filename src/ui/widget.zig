@@ -44,6 +44,7 @@ pub const Widget = union(enum) {
     search_box: SearchBox,
     radio: Radio,
     search_header: SearchHeader,
+    header_scroll: HeaderScroll,
     repo_issues_header: ui.Repo.Issues.Header,
     repo_patches_header: ui.Repo.Patches.Header,
     repo_discussions_header: ui.Repo.Discussions.Header,
@@ -1213,11 +1214,79 @@ pub const Radio = struct {
     }
 };
 
+// a sub-header's row, which scrolls sideways once its children's minimum widths
+// outgrow the window, like the page header: natively on the web, following the
+// focused child in the terminal
+pub const HeaderScroll = struct {
+    scroll: wgt.Scroll(Widget),
+
+    // an empty row, which the caller fills through `row`
+    pub fn init(allocator: std.mem.Allocator, session: *const ui.Session) !HeaderScroll {
+        // the outer box hands the row a max width, which the scroll alone can't
+        var outer = try wgt.Box(Widget).init(allocator, .{ .border = null, .direction = .horiz });
+        errdefer outer.deinit(allocator);
+        {
+            var row_box = try wgt.Box(Widget).init(allocator, .{ .border = null, .direction = .horiz });
+            errdefer row_box.deinit(allocator);
+            try outer.children.put(allocator, row_box.getFocus().id, .{ .widget = .{ .box = row_box }, .rect = null, .min_size = null });
+            outer.getFocus().child_id = row_box.getFocus().id;
+        }
+        return .{ .scroll = try wgt.Scroll(Widget).init(allocator, .{ .box = outer }, .{ .direction = .horiz, .show_bar = false, .web_native = !session.is_terminal }) };
+    }
+
+    pub fn deinit(self: *HeaderScroll, allocator: std.mem.Allocator) void {
+        self.scroll.deinit(allocator);
+    }
+
+    fn rowChild(self: *const HeaderScroll) *wgt.Box(Widget).Child {
+        return &self.scroll.child.box.children.values()[0];
+    }
+
+    pub fn row(self: *const HeaderScroll) *wgt.Box(Widget) {
+        return &self.rowChild().widget.box;
+    }
+
+    pub fn build(self: *HeaderScroll, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
+        self.clearGrid();
+        const row_box = self.row();
+        // bring the focused child into view where the last build put it
+        if (!self.scroll.options.web_native) if (row_box.getFocus().child_id) |id| if (row_box.children.get(id)) |child| if (child.rect) |rect| self.scroll.scrollToRect(rect);
+
+        // the window's width, or the children's minimums when they need more.
+        // only a max, since a min would stretch the row's last laid out child.
+        const width: ?usize = if (constraint.max_size.width) |viewport| blk: {
+            var needed: usize = 0;
+            for (row_box.children.values()) |child| {
+                if (child.min_size) |min_size| needed += min_size.width orelse 0;
+            }
+            break :blk @max(viewport, needed);
+        } else null;
+        self.rowChild().max_size = .{ .width = width, .height = null };
+        try self.scroll.build(allocator, constraint, root_focus);
+    }
+
+    pub fn input(self: *HeaderScroll, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
+        try self.scroll.input(allocator, key, root_focus);
+    }
+
+    pub fn clearGrid(self: *HeaderScroll) void {
+        self.scroll.clearGrid();
+    }
+
+    pub fn getGrid(self: HeaderScroll) ?Grid {
+        return self.scroll.getGrid();
+    }
+
+    pub fn getFocus(self: *HeaderScroll) *Focus {
+        return self.scroll.getFocus();
+    }
+};
+
 // a tab's sub-header: an optional search box on the left, then a spacer, then
 // the clone url on the right. the owning view turns a submitted query into a
 // route, so route building stays with the tab that knows its own url.
 pub const SearchHeader = struct {
-    box: wgt.Box(Widget),
+    scroll: HeaderScroll,
     session: *ui.Session,
 
     pub fn init(
@@ -1229,8 +1298,9 @@ pub const SearchHeader = struct {
         text: ?[]const u8,
         show_input: bool,
     ) !SearchHeader {
-        var box = try wgt.Box(Widget).init(allocator, .{ .border = null, .direction = .horiz });
-        errdefer box.deinit(allocator);
+        var scroll = try HeaderScroll.init(allocator, session);
+        errdefer scroll.deinit(allocator);
+        const box = scroll.row();
 
         // the search box only appears where an index can serve it.
         if (show_input) {
@@ -1257,20 +1327,20 @@ pub const SearchHeader = struct {
             }
         }
 
-        return .{ .box = box, .session = session };
+        return .{ .scroll = scroll, .session = session };
     }
 
     pub fn deinit(self: *SearchHeader, allocator: std.mem.Allocator) void {
-        self.box.deinit(allocator);
+        self.scroll.deinit(allocator);
     }
 
     pub fn build(self: *SearchHeader, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
         self.clearGrid();
-        try self.box.build(allocator, constraint, root_focus);
+        try self.scroll.build(allocator, constraint, root_focus);
     }
 
     pub fn input(self: *SearchHeader, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
-        const current = self.box.getFocus().child_id orelse return;
+        const current = self.scroll.row().getFocus().child_id orelse return;
         if (self.searchBox()) |search_box| {
             if (current == search_box.getFocus().id) {
                 // tab, and right-arrow past the last character, step to the
@@ -1298,7 +1368,7 @@ pub const SearchHeader = struct {
     // focus. the caller owns the returned text.
     pub fn submittedText(self: *SearchHeader, allocator: std.mem.Allocator) !?[]u8 {
         const search_box = self.searchBox() orelse return null;
-        if (self.box.getFocus().child_id != search_box.getFocus().id) return null;
+        if (self.scroll.row().getFocus().child_id != search_box.getFocus().id) return null;
         return try search_box.text(allocator);
     }
 
@@ -1318,7 +1388,7 @@ pub const SearchHeader = struct {
     }
 
     fn cloneUrl(self: *SearchHeader) ?*CopyableText {
-        for (self.box.children.values()) |*child| switch (child.widget) {
+        for (self.scroll.row().children.values()) |*child| switch (child.widget) {
             .copyable_text => |*copyable_text| return copyable_text,
             else => {},
         };
@@ -1326,7 +1396,7 @@ pub const SearchHeader = struct {
     }
 
     fn searchBox(self: *SearchHeader) ?*SearchBox {
-        for (self.box.children.values()) |*child| switch (child.widget) {
+        for (self.scroll.row().children.values()) |*child| switch (child.widget) {
             .search_box => |*search_box| return search_box,
             else => {},
         };
@@ -1334,15 +1404,15 @@ pub const SearchHeader = struct {
     }
 
     pub fn clearGrid(self: *SearchHeader) void {
-        self.box.clearGrid();
+        self.scroll.clearGrid();
     }
 
     pub fn getGrid(self: SearchHeader) ?Grid {
-        return self.box.getGrid();
+        return self.scroll.getGrid();
     }
 
     pub fn getFocus(self: *SearchHeader) *Focus {
-        return self.box.getFocus();
+        return self.scroll.getFocus();
     }
 };
 

@@ -164,8 +164,9 @@ pub const View = struct {
 
         // both backends list refs in sorted order, so a prefix is just a seek
         {
-            var header = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .horiz });
-            errdefer header.deinit(allocator);
+            var header_scroll = try ui.widget.HeaderScroll.init(allocator, session);
+            errdefer header_scroll.deinit(allocator);
+            const header = header_scroll.row();
             {
                 var search_box = try ui.widget.SearchBox.init(allocator, session, " search ", "search", data.search);
                 errdefer search_box.deinit(allocator);
@@ -179,7 +180,7 @@ pub const View = struct {
                 try header.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
             }
             // a row taller than the box, leaving a blank line above the columns
-            try outer.children.put(allocator, header.getFocus().id, .{ .widget = .{ .box = header }, .rect = null, .min_size = .{ .width = null, .height = 4 } });
+            try outer.children.put(allocator, header_scroll.getFocus().id, .{ .widget = .{ .header_scroll = header_scroll }, .rect = null, .min_size = .{ .width = null, .height = 4 } });
         }
 
         // with both columns empty, the empty message stands in for them
@@ -358,7 +359,7 @@ pub const View = struct {
     }
 
     fn searchBox(self: *View) *ui.widget.SearchBox {
-        return &self.box.children.values()[header_index].widget.box.children.values()[0].widget.search_box;
+        return &self.box.children.values()[header_index].widget.header_scroll.row().children.values()[0].widget.search_box;
     }
 
     fn headerActive(self: *View) bool {

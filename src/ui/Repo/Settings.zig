@@ -74,8 +74,9 @@ pub const View = struct {
         errdefer box.deinit(allocator);
 
         {
-            var header = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .horiz });
-            errdefer header.deinit(allocator);
+            var header_scroll = try ui.widget.HeaderScroll.init(allocator, session);
+            errdefer header_scroll.deinit(allocator);
+            const header = header_scroll.row();
             const on_tab = switch (session.data.current_page) {
                 .repo_settings, .repo_members, .repo_branches => true,
                 else => false,
@@ -90,7 +91,7 @@ pub const View = struct {
             }
             header.getFocus().child_id = header.children.keys()[@backingInt(data.view)];
             // a row taller than the header, leaving a blank line beneath it
-            try box.children.put(allocator, header.getFocus().id, .{ .widget = .{ .box = header }, .rect = null, .min_size = .{ .width = null, .height = 4 } });
+            try box.children.put(allocator, header_scroll.getFocus().id, .{ .widget = .{ .header_scroll = header_scroll }, .rect = null, .min_size = .{ .width = null, .height = 4 } });
         }
 
         {
@@ -123,7 +124,7 @@ pub const View = struct {
     }
 
     fn headerBox(self: *View) *wgt.Box(ui.Widget) {
-        return &self.box.children.values()[header_index].widget.box;
+        return self.box.children.values()[header_index].widget.header_scroll.row();
     }
 
     fn contentStack(self: *View) *wgt.Stack(ui.Widget) {
@@ -131,7 +132,7 @@ pub const View = struct {
     }
 
     fn headerActive(self: *View) bool {
-        return self.box.getFocus().child_id == self.headerBox().getFocus().id;
+        return self.box.getFocus().child_id == self.box.children.keys()[header_index];
     }
 
     pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {

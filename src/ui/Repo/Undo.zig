@@ -395,14 +395,18 @@ pub const View = struct {
 
         // the sub header carries the tab's only action
         {
-            var header = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .horiz });
-            errdefer header.deinit(allocator);
+            var header_scroll = try ui.widget.HeaderScroll.init(allocator, session);
+            errdefer header_scroll.deinit(allocator);
+            const header = header_scroll.row();
             const route = ui.RoutablePage.repoUndoClearRoute(data.identity) orelse return error.RouteTooLong;
             const link = try session.page_arena.allocator().print("a:{s}", .{try route.toUrl(session.page_arena)});
-            try addText(allocator, &header, "clear undo history", link, .single);
+            const clear_label = "clear undo history";
+            try addText(allocator, header, clear_label, link, .single);
+            // one line wide, so a narrow window scrolls the row instead of wrapping it
+            header.children.values()[0].min_size = .{ .width = clear_label.len + 2, .height = null };
             header.getFocus().child_id = header.children.keys()[0];
             // a row taller than the header, leaving a blank line beneath it
-            try outer.children.put(allocator, header.getFocus().id, .{ .widget = .{ .box = header }, .rect = null, .min_size = .{ .width = null, .height = 4 } });
+            try outer.children.put(allocator, header_scroll.getFocus().id, .{ .widget = .{ .header_scroll = header_scroll }, .rect = null, .min_size = .{ .width = null, .height = 4 } });
         }
 
         // the clear form, or the empty message when there is no history or failure to show
@@ -509,10 +513,10 @@ pub const View = struct {
     }
 
     fn headerBox(self: *View) *wgt.Box(ui.Widget) {
-        return &self.box.children.values()[header_index].widget.box;
+        return self.box.children.values()[header_index].widget.header_scroll.row();
     }
     fn headerActive(self: *View) bool {
-        return self.box.getFocus().child_id == self.headerBox().getFocus().id;
+        return self.box.getFocus().child_id == self.box.children.keys()[header_index];
     }
     fn contentBox(self: *View) *wgt.Box(ui.Widget) {
         return &self.box.children.values()[content_index].widget.box;
