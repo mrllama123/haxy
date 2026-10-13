@@ -12,6 +12,8 @@ write_access: Access = .private,
 discuss_role: ?Role = .read,
 issue_role: ?Role = .read,
 patch_role: ?Role = null,
+// newline-separated names of the branches a push may not delete or force push
+protected_branches: []const u8 = "",
 
 // what the db stores: the event's data plus the commit-derived fields
 pub const Record = struct {
@@ -49,6 +51,18 @@ pub const Role = enum {
 };
 
 pub const name_max_len = 32;
+// how many branches a repo may protect, so the branches tab stays one short page
+pub const protected_branch_max_count = 50;
+
+// the protected branch names
+pub fn protectedBranchNames(self: Self, allocator: std.mem.Allocator) ![]const []const u8 {
+    var names: std.ArrayList([]const u8) = .empty;
+    var lines = std.mem.splitScalar(u8, self.protected_branches, '\n');
+    while (lines.next()) |line| {
+        if (line.len > 0) try names.append(allocator, line);
+    }
+    return try names.toOwnedSlice(allocator);
+}
 
 // the role a kind's tab needs for a write, or null when the tab is off or the
 // kind has no tab

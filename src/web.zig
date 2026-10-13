@@ -159,7 +159,7 @@ fn handleRequest(
         switch (host) {
             .server => |server| {
                 // "repo/new" and "user/new" come before "new", which would claim them
-                const PostRoute = enum { login, logout, @"repo/new", @"user/new", user, addkey, removekey, settings, grant, revoke, promote, demote, new, edit, remove, open, close, resolve, publish, merge, squash, attach, assign, unassign, subscribe, mute, undo, clear };
+                const PostRoute = enum { login, logout, @"repo/new", @"user/new", user, addkey, removekey, settings, grant, revoke, promote, demote, protect, unprotect, new, edit, remove, open, close, resolve, publish, merge, squash, attach, assign, unassign, subscribe, mute, undo, clear };
                 inline for (@typeInfo(PostRoute).@"enum".field_names) |name| {
                     const suffix = "/" ++ name;
                     if (std.mem.endsWith(u8, path, suffix)) {
@@ -177,6 +177,8 @@ fn handleRequest(
                             .revoke => handleMembers(io, request, allocator, base, host, .revoke),
                             .promote => handleMembers(io, request, allocator, base, host, .promote),
                             .demote => handleMembers(io, request, allocator, base, host, .demote),
+                            .protect => handleBranches(io, request, allocator, base, host, .protect),
+                            .unprotect => handleBranches(io, request, allocator, base, host, .unprotect),
                             .new => handleNew(io, request, allocator, base, host),
                             .edit => handleEdit(io, request, allocator, base, host),
                             .remove => handleRemove(io, request, allocator, base, host),
@@ -799,6 +801,40 @@ fn handleMembers(io: std.Io, request: *std.http.Server.Request, allocator: std.m
         return respondFormFailure(request, allocator, server.session_store, location, .{ .repo_members = .{ .failure = value, .name = name } });
     }
     const location = try (ui.Repo.Members.landingRoute(identity, target.start, actor, action, name) orelse return error.RouteTooLong).toUrl(&arena);
+    try request.respond("", .{ .status = .see_other, .keep_alive = false, .extra_headers = &.{.{ .name = "location", .value = location }} });
+}
+
+// protect or unprotect a branch of the repo the branches url `base` names, as
+// one of its owners, then redirect back to the list. the add form names the
+// branch in its body and the row forms in the url.
+fn handleBranches(io: std.Io, request: *std.http.Server.Request, allocator: std.mem.Allocator, base: []const u8, host: Host, action: ui.Repo.Branches.Action) !void {
+    const server = switch (host) {
+        .server => |server| server,
+        .local => return respondRepoNotFound(request),
+    };
+    const route = routeFromUrl(host, base) orelse return respondRepoNotFound(request);
+    if (route != .repo_branches) return respondRepoNotFound(request);
+    const target = route.repo_branches;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const identity = target.name.slice();
+    const actor = (try authorizeWrite(io, allocator, &arena, request, host, try arena.allocator().print("/{s}", .{identity}), .owner, null)) orelse return;
+
+    const branch = switch (action) {
+        .protect => blk: {
+            const body = try readFormBody(request, allocator);
+            defer allocator.free(body);
+            break :blk (try parseFormField(arena.allocator(), body, "name")) orelse "";
+        },
+        .unprotect => if (target.branch.len != 0) std.Uri.percentDecodeInPlace(try arena.allocator().dupe(u8, target.branch.slice())) else return respondRepoNotFound(request),
+    };
+
+    const failure = ui.Repo.Branches.perform(io, allocator, server.users_dir, actor, identity, action, branch) catch |err| switch (err) {
+        error.NotFound => return respondRepoNotFound(request),
+        else => return err,
+    };
+    const location = try (ui.RoutablePage.repoBranchesRoute(identity) orelse return error.RouteTooLong).toUrl(&arena);
+    if (failure) |value| return respondFormFailure(request, allocator, server.session_store, location, .{ .repo_branches = .{ .failure = value, .name = branch } });
     try request.respond("", .{ .status = .see_other, .keep_alive = false, .extra_headers = &.{.{ .name = "location", .value = location }} });
 }
 

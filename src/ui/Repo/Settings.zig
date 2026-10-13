@@ -13,6 +13,7 @@ const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 
 const Members = @import("./Members.zig");
+const Branches = @import("./Branches.zig");
 
 const wasm = builtin.target.cpu.arch == .wasm32;
 
@@ -29,8 +30,9 @@ issue_role: ?evt.Repo.Role,
 patch_role: ?evt.Repo.Role,
 hash_kind: hash.HashKind,
 // the sub tab the route names
-view: enum { settings, members },
+view: enum { settings, members, branches },
 members: Members,
+branches: Branches,
 
 const Self = @This();
 
@@ -60,7 +62,7 @@ pub fn labelRole(label: []const u8) error{InvalidRole}!?evt.Repo.Role {
     return error.InvalidRole;
 }
 
-// the repo settings and members sub tabs over their content
+// the repo settings, members and branches sub tabs over their content
 pub const View = struct {
     box: wgt.Box(ui.Widget),
 
@@ -75,11 +77,11 @@ pub const View = struct {
             var header = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .horiz });
             errdefer header.deinit(allocator);
             const on_tab = switch (session.data.current_page) {
-                .repo_settings, .repo_members => true,
+                .repo_settings, .repo_members, .repo_branches => true,
                 else => false,
             };
-            const routes = [_]?ui.RoutablePage{ ui.RoutablePage.repoSettingsRoute(data.identity), ui.RoutablePage.repoMembersRoute(data.identity, 0) };
-            for ([_]@FieldType(Self, "view"){ .settings, .members }, [_][]const u8{ "repo settings", "members" }, routes) |view, label, route| {
+            const routes = [_]?ui.RoutablePage{ ui.RoutablePage.repoSettingsRoute(data.identity), ui.RoutablePage.repoMembersRoute(data.identity, 0), ui.RoutablePage.repoBranchesRoute(data.identity) };
+            for ([_]@FieldType(Self, "view"){ .settings, .members, .branches }, [_][]const u8{ "repo settings", "members", "branches" }, routes) |view, label, route| {
                 var tab = try wgt.TextBox.init(allocator, label, .{ .border = .hidden, .round_corners = true, .wrap_kind = .none });
                 errdefer tab.deinit(allocator);
                 tab.getFocus().mode = .all;
@@ -103,6 +105,11 @@ pub const View = struct {
                 var members = try Members.View.init(allocator, &data.members, session);
                 errdefer members.deinit(allocator);
                 try stack.children.put(allocator, members.getFocus().id, .{ .repo_members = members });
+            }
+            {
+                var branches = try Branches.View.init(allocator, &data.branches, session);
+                errdefer branches.deinit(allocator);
+                try stack.children.put(allocator, branches.getFocus().id, .{ .repo_branches = branches });
             }
             stack.getFocus().child_id = stack.children.keys()[@backingInt(data.view)];
             try box.children.put(allocator, stack.getFocus().id, .{ .widget = .{ .stack = stack }, .rect = null, .min_size = null });

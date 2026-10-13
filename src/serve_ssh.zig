@@ -386,10 +386,10 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, exec: ss
     }
 
     const owner_repo = evt.parseOwnerRepoPath(repo_identity) orelse return writeError(sess, "repo path must be <owner>:<repo>");
-    var author_arena = std.heap.ArenaAllocator.init(allocator);
-    defer author_arena.deinit();
-    const author = switch (try authorizeRepoKey(io, &author_arena, handler.admin_repo_path, handler.server.users_dir, owner_repo.owner, owner_repo.name, parsed.service, &sess.fingerprint)) {
-        .allowed => |user| user,
+    var allowed_arena = std.heap.ArenaAllocator.init(allocator);
+    defer allowed_arena.deinit();
+    const allowed = switch (try authorizeRepoKey(io, &allowed_arena, handler.admin_repo_path, handler.server.users_dir, owner_repo.owner, owner_repo.name, parsed.service, &sess.fingerprint)) {
+        .allowed => |value| value,
         .create => |creator| return runCreatingPush(handler, sess, &creator, owner_repo.name, protocol_version, &reader.interface, &writer.interface),
         .denied => return switch (parsed.service) {
             .upload_pack => writeError(sess, "unauthorized: this SSH key cannot read this repo"),
@@ -414,7 +414,7 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, exec: ss
                 var sideband = progress.Sideband{ .writer = &writer.interface, .sess = sess };
                 try repo.uploadPack(io, allocator, &reader.interface, &writer.interface, .{ .protocol_version = protocol_version }, &sideband);
             },
-            .receive_pack => try push.receivePackAndConsume(repo.self_repo_opts, io, allocator, repo, &reader.interface, &writer.interface, .{ .protocol_version = protocol_version }, author, handler.server, handler.err, sess),
+            .receive_pack => try push.receivePackAndConsume(repo.self_repo_opts, io, allocator, repo, &reader.interface, &writer.interface, .{ .protocol_version = protocol_version, .protected_branches = allowed.protected_branches }, allowed.author, handler.server, handler.err, sess),
         },
     }
 }
@@ -547,7 +547,14 @@ fn parseGitCommand(allocator: std.mem.Allocator, command: []const u8) !ParsedGit
     return .{ .service = service, .dir = try allocator.dupe(u8, dir_token) };
 }
 
-const RepoAuthorization = union(enum) { allowed: ?evt.CommitAuthor, create: RepoCreator, denied, not_found };
+const RepoAuthorization = union(enum) { allowed: Allowed, create: RepoCreator, denied, not_found };
+
+// a key allowed into an existing repo
+const Allowed = struct {
+    // null when the repo's base role let the key in
+    author: ?evt.CommitAuthor,
+    protected_branches: []const []const u8,
+};
 
 // the owner of a repo a push may create
 const RepoCreator = struct {
@@ -585,9 +592,10 @@ fn authorizeRepoKey(
         .upload_pack => .read,
         .receive_pack => .write,
     };
+    const protected_branches = try repo.repo.event.protectedBranchNames(arena.allocator());
     // skip the key lookups when the base role is enough
     if (repo.role) |base| {
-        if (base.atLeast(min_role)) return .{ .allowed = null };
+        if (base.atLeast(min_role)) return .{ .allowed = .{ .author = null, .protected_branches = protected_branches } };
     }
 
     // a key can be shared, so a holder whose role falls short doesn't end the search
@@ -595,7 +603,7 @@ fn authorizeRepoKey(
     for (try evt.User.readIdsByFingerprint(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, fingerprint)) |holder_id| {
         const seen = (try evt.readRepoById(io, allocator, arena, users_dir, &owner_id, &repo.event_id, holder_id)) orelse return .not_found;
         const role = seen.role orelse continue;
-        if (role.atLeast(min_role)) return .{ .allowed = try commitAuthor(moment, arena, &holder_id) };
+        if (role.atLeast(min_role)) return .{ .allowed = .{ .author = try commitAuthor(moment, arena, &holder_id), .protected_branches = protected_branches } };
     }
     return .denied;
 }

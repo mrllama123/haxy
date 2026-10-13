@@ -2230,6 +2230,57 @@ pub fn revokeRole(
     try remove(.{ .server = .{ .users_dir = users_dir } }, .user, .xit, user_repo_opts, io, allocator, &user_repo, &Grant.idOf(repo_id, user_id), .grant, author);
 }
 
+// add `branch` to the protected branches of the repo `repo_id` in its owner's
+// user repo, or take it out when `protect` is false. taking out a branch that
+// isn't protected writes nothing.
+pub fn protectBranch(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    users_dir: []const u8,
+    owner_id: *const [event_id_size]u8,
+    repo_id: *const [event_id_size]u8,
+    branch: []const u8,
+    protect: bool,
+    author: CommitAuthor,
+) !void {
+    var user_repo = (try openUserRepo(io, allocator, users_dir, owner_id)) orelse return error.NotFound;
+    defer user_repo.deinit(io, allocator);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    const moment = (try userMoment(&user_repo)) orelse return error.NotFound;
+    const repo = (try Repo.readById(UserDB, user_repo_opts.hash, moment, &arena, repo_id)) orelse return error.NotFound;
+    if (repo.removed) return error.NotFound;
+
+    var branches: std.ArrayList(u8) = .empty;
+    var count: usize = 0;
+    var held = false;
+    for (try repo.event.protectedBranchNames(aa)) |name| {
+        if (std.mem.eql(u8, name, branch)) {
+            held = true;
+            if (!protect) continue;
+        }
+        if (branches.items.len > 0) try branches.append(aa, '\n');
+        try branches.appendSlice(aa, name);
+        count += 1;
+    }
+    if (protect) {
+        if (held) return error.BranchProtected;
+        if (count >= Repo.protected_branch_max_count) return error.TooManyProtectedBranches;
+        if (branches.items.len > 0) try branches.append(aa, '\n');
+        try branches.appendSlice(aa, branch);
+    } else if (!held) return;
+
+    var event = repo.event;
+    event.protected_branches = branches.items;
+    try consume(.{ .server = .{ .users_dir = users_dir } }, .user, .xit, user_repo_opts, io, allocator, &user_repo, events_ref, &[_]EventWithId{.{
+        .id = std.fmt.bytesToHex(repo_id.*, .lower),
+        .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
+        .author = author,
+        .event = .{ .repo = event },
+    }});
+}
+
 // create a user and their user repo, returning the new user's id
 pub fn createUser(
     io: std.Io,
