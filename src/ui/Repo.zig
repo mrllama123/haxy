@@ -278,6 +278,7 @@ pub fn init(
     const handle = ui.RepoHandle{
         .location = .{ .repo = try arena.allocator().dupe(u8, repo_identity.identity) },
         .viewer = try ui.Viewer.init(session, arena, role),
+        .read_access = repo.event.read_access,
     };
 
     // open the repo once for every tab. files and changes share a ref or revision.

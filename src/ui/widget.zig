@@ -2021,7 +2021,8 @@ pub const CopyableText = struct {
         var ssh_index: ?usize = null;
         switch (handle.location) {
             .repo => |identity| {
-                if (session.data.git_http_port) |port| {
+                const http_port = if (handle.read_access == .public) session.data.git_http_port else null;
+                if (http_port) |port| {
                     const url = try aa.print("http://localhost:{d}/{s}", .{ port, identity });
                     choices[count] = .{
                         .selector = "http",

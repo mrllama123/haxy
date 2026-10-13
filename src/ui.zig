@@ -2123,6 +2123,8 @@ pub const Viewer = struct {
 pub const RepoHandle = struct {
     location: RoutablePage.RepoLocation,
     viewer: ?Viewer = null,
+    // only a public repo can be cloned over http
+    read_access: evt.Repo.Access = .private,
 
     pub fn dupe(self: RepoHandle, allocator: std.mem.Allocator) !RepoHandle {
         var copy = self;
