@@ -123,6 +123,7 @@ pub fn receivePackAndConsume(
     author: evt.CommitAuthor,
     pusher_id: *const [evt.event_id_size]u8,
     server: evt.Host.Server,
+    max_repo_size: ?u64,
     error_writer: *std.Io.Writer,
     sess: ?*ssh.SessionCtx,
 ) !void {
@@ -135,7 +136,12 @@ pub fn receivePackAndConsume(
     var updates = xit.net_server_receive_pack.AppliedRefUpdates.init(allocator);
     defer updates.deinit();
 
-    var sideband = progress.Sideband{ .response = &response, .writer = writer, .sess = sess };
+    var sideband = progress.Sideband{
+        .response = &response,
+        .writer = writer,
+        .sess = sess,
+        .size_limit = if (max_repo_size) |max| .{ .file = repo.core.db_file, .max = max } else null,
+    };
     // the moment index the pushed events were consumed into
     var moment_index: ?u64 = null;
     const Ctx = struct {
@@ -193,6 +199,8 @@ pub fn receivePackAndConsume(
             _ = try srch_cmmt.refreshInTransaction(repo_opts, state, &moment, ctx.io, ctx.allocator, moves.items, ctx.sideband);
 
             try writeUndo(repo_opts, state, ctx.io, ctx.allocator, ctx.author, ctx.updates.items.items);
+            // the indexes count against the limit too
+            try ctx.sideband.checkSize(ctx.io);
         }
     };
 
@@ -270,6 +278,7 @@ pub fn receiveFork(
     timestamp: u64,
     reader: *std.Io.Reader,
     writer: *std.Io.Writer,
+    max_repo_size: ?u64,
     error_writer: *std.Io.Writer,
     sess: ?*ssh.SessionCtx,
 ) !void {
@@ -304,7 +313,12 @@ pub fn receiveFork(
     var revision_id_maybe: ?[evt.event_id_size]u8 = null;
     var response = xit.net_server_receive_pack.Response.init(allocator);
     defer response.deinit();
-    var sideband = progress.Sideband{ .response = &response, .writer = writer, .sess = sess };
+    var sideband = progress.Sideband{
+        .response = &response,
+        .writer = writer,
+        .sess = sess,
+        .size_limit = if (max_repo_size) |max| .{ .file = fork_repo.core.db_file, .max = max } else null,
+    };
 
     // execute a transaction that receives the push and materializes its revision
     const result = blk: {
@@ -400,6 +414,8 @@ pub fn receiveFork(
 
                 // a fork push tracks no ref updates, so it records no ranges
                 try writeUndo(repo_opts, state, ctx.io, ctx.allocator, ctx.author, &.{});
+                // the copied target history and the index count against the limit too
+                try ctx.sideband.checkSize(ctx.io);
             }
         };
 

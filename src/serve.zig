@@ -15,6 +15,8 @@ pub const Options = struct {
     // the public urls shown to users, defaulting to localhost and the bound port
     web_url: ?[]const u8 = null,
     ssh_url: ?[]const u8 = null,
+    // the size a pushed repo's db may grow to, or null for no limit
+    max_repo_size: ?u64 = null,
     data_dir: []const u8 = ".",
     git_ssh_prefix: []const u8 = "",
     fallback_on_address_in_use: bool = false,
@@ -121,6 +123,7 @@ pub fn run(
                 .web_url = web_url,
                 .ssh_url = ssh_url,
                 .git_ssh_prefix = options.git_ssh_prefix,
+                .max_repo_size = options.max_repo_size,
                 .err = err,
             },
         };

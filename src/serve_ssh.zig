@@ -34,6 +34,8 @@ pub const SessionHandler = struct {
     web_url: []const u8,
     ssh_url: ?[]const u8,
     git_ssh_prefix: []const u8,
+    // the size a pushed repo's db may grow to, or null for no limit
+    max_repo_size: ?u64,
     err: *std.Io.Writer,
 
     /// returning without an exit leaves the protocol layer to send status 0
@@ -418,7 +420,7 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, exec: ss
                 .protected_branches = pusher.protected_branches,
                 .locked_branches = pusher.locked_branches,
                 .pseudo_ref = .{ .name = push.clear_undo_ref, .deletable = pusher.owner },
-            }, pusher.author, &pusher.user_id, handler.server, handler.err, sess),
+            }, pusher.author, &pusher.user_id, handler.server, handler.max_repo_size, handler.err, sess),
         },
     }
 }
@@ -456,7 +458,7 @@ fn runCreatingPush(
             var repo = try rp.Repo(.xit, any_repo_opts.toRepoOptsWithHash(kind)).open(io, allocator, .{ .path = repo_path });
             defer repo.deinit(io, allocator);
             // stateless since the advertisement already went out
-            try push.receivePackAndConsume(repo.self_repo_opts, io, allocator, &repo, reader, writer, .{ .protocol_version = protocol_version, .is_stateless = true, .pseudo_ref = .{ .name = push.clear_undo_ref, .deletable = true } }, creator.owner, &creator.owner_id, handler.server, handler.err, sess);
+            try push.receivePackAndConsume(repo.self_repo_opts, io, allocator, &repo, reader, writer, .{ .protocol_version = protocol_version, .is_stateless = true, .pseudo_ref = .{ .name = push.clear_undo_ref, .deletable = true } }, creator.owner, &creator.owner_id, handler.server, handler.max_repo_size, handler.err, sess);
         },
     }
 }
@@ -539,7 +541,7 @@ fn runForkSession(
                 var target_repo = rp.Repo(.xit, repo.self_repo_opts).open(io, allocator, .{ .path = target_path }) catch
                     return writeError(sess, "repo not found or has the wrong hash");
                 defer target_repo.deinit(io, allocator);
-                try push.receiveFork(repo.self_repo_opts, io, allocator, repo, &target_repo, handler.server, &route.id, author, timestamp, reader, writer, handler.err, sess);
+                try push.receiveFork(repo.self_repo_opts, io, allocator, repo, &target_repo, handler.server, &route.id, author, timestamp, reader, writer, handler.max_repo_size, handler.err, sess);
             },
         }
     }

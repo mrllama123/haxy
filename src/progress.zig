@@ -20,6 +20,10 @@ pub const Sideband = struct {
     sess: ?*ssh.SessionCtx = null,
     // set once it has hung up, so the phase in flight can stop too
     gone: bool = false,
+    // a pushed repo's db and the size it may grow to
+    size_limit: ?SizeLimit = null,
+    // set once the db outgrew size_limit, so the phase in flight can stop too
+    too_large: bool = false,
     label: []const u8 = "Processing commits",
     count: usize = 0,
     total: usize = 0,
@@ -28,6 +32,19 @@ pub const Sideband = struct {
 
     // how many items a phase with no total advances between reports
     const report_every = 1000;
+
+    pub const SizeLimit = struct {
+        file: std.Io.File,
+        max: u64,
+    };
+
+    // fail once the pushed repo's db has outgrown its limit
+    pub fn checkSize(self: *Sideband, io: std.Io) !void {
+        const limit = self.size_limit orelse return;
+        if (try limit.file.length(io) <= limit.max) return;
+        self.too_large = true;
+        return error.RepoTooLarge;
+    }
 
     // the phases a client is told about, listed so a new kind has to be
     // decided on rather than inherit whatever label was last set. unpacking is
@@ -40,7 +57,9 @@ pub const Sideband = struct {
         };
     }
 
-    pub fn run(self: *Sideband, _: std.Io, event: rp.ProgressEvent) !void {
+    pub fn run(self: *Sideband, io: std.Io, event: rp.ProgressEvent) !void {
+        // every unpacked object reports, so a push stops soon after crossing the limit
+        if (event == .complete_one) try self.checkSize(io);
         switch (event) {
             .start => |start| {
                 if (!reported(start.kind)) return;
@@ -105,10 +124,11 @@ pub const Sideband = struct {
     }
 };
 
-// whether the client the work is reporting to has hung up. only a sideband
-// reporter probes, so any other context never cancels.
+// whether the client the work is reporting to has hung up, or its push has
+// outgrown the repo size limit. only a sideband reporter probes, so any other
+// context never cancels.
 pub fn cancelled(comptime repo_opts: rp.RepoOpts(.xit), progress_ctx_maybe: ?repo_opts.ProgressCtx) bool {
     if (repo_opts.ProgressCtx != *Sideband) return false;
     const progress_ctx = progress_ctx_maybe orelse return false;
-    return progress_ctx.gone;
+    return progress_ctx.gone or progress_ctx.too_large;
 }

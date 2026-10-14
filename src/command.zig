@@ -22,6 +22,7 @@ fn commandHelp(command_kind: CommandKind) Help {
             \\haxy serve --web-listen 127.0.0.1:8080 --ssh-listen 127.0.0.1:8022 --data-dir /srv/git
             \\use "none" for --ssh-listen to disable ssh. git clones over HTTP share the web UI's listener.
             \\--web-url and --ssh-url set the public urls shown to users, like https://example.com and ssh://example.com.
+            \\--max-repo-size caps each repo's on-disk size, like 1G, rejecting pushes past it. no limit by default.
             ,
         },
     };
@@ -88,6 +89,7 @@ pub const CommandArgs = struct {
         .{"--ssh-listen"},
         .{"--web-url"},
         .{"--ssh-url"},
+        .{"--max-repo-size"},
         .{"--data-dir"},
     });
 
@@ -211,8 +213,23 @@ fn serveOptions(cmd_args: *CommandArgs) !?srv.Options {
     // urls are joined with "/" + a path
     if (cmd_args.get("--web-url")) |value_maybe| options.web_url = std.mem.trimEnd(u8, value_maybe orelse return error.WebUrlNeedsValue, "/");
     if (cmd_args.get("--ssh-url")) |value_maybe| options.ssh_url = std.mem.trimEnd(u8, value_maybe orelse return error.SshUrlNeedsValue, "/");
+    if (cmd_args.get("--max-repo-size")) |value_maybe| options.max_repo_size = try parseSize(value_maybe orelse return error.MaxRepoSizeNeedsValue);
     if (cmd_args.get("--data-dir")) |value_maybe| options.data_dir = value_maybe orelse return error.DataDirNeedsValue;
     return options;
+}
+
+// a byte count with an optional K, M or G suffix
+fn parseSize(value: []const u8) !u64 {
+    if (value.len == 0) return error.InvalidSize;
+    const shift: u6 = switch (value[value.len - 1]) {
+        'K', 'k' => 10,
+        'M', 'm' => 20,
+        'G', 'g' => 30,
+        else => 0,
+    };
+    const digits = if (shift == 0) value else value[0 .. value.len - 1];
+    const count = std.fmt.parseInt(u64, digits, 10) catch return error.InvalidSize;
+    return std.math.shlExact(u64, count, shift) catch error.InvalidSize;
 }
 
 /// parses the given args into a command if valid, and determines how it should be run
