@@ -1013,7 +1013,7 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                 try inner_box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
                 self.title_id = text_box.getFocus().id;
             } else {
-                var title = try wgt.TextBox.init(allocator, entry.record.event.title, .{ .border = .single, .round_corners = true, .wrap_kind = .word, .top_label = .{ .text = " title " } });
+                var title = try wgt.TextBox.initSpans(allocator, &.{.{ .text = entry.record.event.title, .style = .{ .bold = true } }}, .{ .border = .single, .round_corners = true, .wrap_kind = .word, .top_label = .{ .text = " title " } });
                 errdefer title.deinit(allocator);
                 title.getFocus().mode = .all;
                 try inner_box.children.put(allocator, title.getFocus().id, .{ .widget = .{ .text_box = title }, .rect = null, .min_size = null });
