@@ -861,6 +861,16 @@ fn testPushFork(
     defer allocator.free(denied_url);
     try client.addRemote(io, allocator, .{ .name = "denied", .value = denied_url });
     try std.testing.expectError(error.ServerReportedError, client.push(io, allocator, "denied", "master:patch", false, .{ .wire = .{ .ssh = .{ .command = reject_ssh_cmd } } }));
+    // a fork is as readable as its private target, so a key nobody holds can't fetch it
+    try std.testing.expectError(error.ServerReportedError, client.fetch(io, allocator, "denied", .{ .wire = .{ .ssh = .{ .command = reject_ssh_cmd } } }));
+
+    // once the target is gone, only the forker's key may fetch the fork
+    {
+        var user_repo = (try evt.openUserRepo(io, allocator, users_dir, &user_id)) orelse return error.NotFound;
+        defer user_repo.deinit(io, allocator);
+        try evt.remove(.{ .server = .{ .users_dir = users_dir } }, .user, .xit, evt.user_repo_opts, io, allocator, &user_repo, &repo_id, .repo, .{ .name = "admin", .email = "admin@example.test" });
+    }
+    try std.testing.expectError(error.ServerReportedError, client.fetch(io, allocator, "denied", .{ .wire = .{ .ssh = .{ .command = reject_ssh_cmd } } }));
 }
 
 fn testPushCreatesMissingRepo(

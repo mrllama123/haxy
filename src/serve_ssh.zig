@@ -509,6 +509,14 @@ fn runForkSession(
             if (!role.atLeast(patch_role)) return writeError(sess, "unauthorized: your role in this repo may not write patches");
         }
     }
+    if (service == .upload_pack) {
+        // a fork is as readable as its target, and only its forker's once the target is gone
+        const readable = if (target) |value| readable: {
+            const owner = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &admin_arena, &target_owner_id)) orelse unreachable;
+            break :readable try authorizeRepoKey(io, &admin_arena, handler.admin_repo_path, handler.server.users_dir, owner.event.name, value.repo.event.name, .upload_pack, &sess.fingerprint) == .allowed;
+        } else try evt.User.holdsKey(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &admin_arena, &forker_id, &sess.fingerprint);
+        if (!readable) return writeError(sess, "unauthorized: this SSH key cannot read this patch draft");
+    }
 
     const draft_path = try fork.forkPath(allocator, handler.server.users_dir, &forker_id, &fork_id);
     defer allocator.free(draft_path);
