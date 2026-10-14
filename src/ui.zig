@@ -1999,10 +1999,14 @@ pub const RoutablePage = union(enum) {
         return a.parent() == .fork and b.parent() == .fork and !a.eql(b);
     }
 
-    // true when `a` and `b` are the same user paginated to a different repos
-    // window or search. switching between a user's tabs is in-page, so only a
-    // changed `start` or search on the same list navigates.
+    // true when `a` and `b` are different users' pages, or the same user
+    // paginated to a different repos window or search. switching between a
+    // user's tabs is in-page, so only a changed `start` or search on the same
+    // list navigates.
     pub fn userPageChanged(a: RoutablePage, b: RoutablePage) bool {
+        if (a.userPageName()) |a_name| if (b.userPageName()) |b_name| {
+            if (!std.mem.eql(u8, a_name, b_name)) return true;
+        };
         return switch (a) {
             .user_repos => |aa| switch (b) {
                 .user_repos => |bb| std.mem.eql(u8, aa.name.slice(), bb.name.slice()) and !a.eql(b),
@@ -2017,6 +2021,17 @@ pub const RoutablePage = union(enum) {
                 else => false,
             },
             else => false,
+        };
+    }
+
+    // the user a user page belongs to, or null for any other page
+    fn userPageName(self: *const RoutablePage) ?[]const u8 {
+        return switch (self.*) {
+            .user_repos => |*page| page.name.slice(),
+            .user_forks => |*page| page.name.slice(),
+            .user_user => |*page| page.name.slice(),
+            .user_repo_new, .user_user_new => |*name| name.slice(),
+            else => null,
         };
     }
 
