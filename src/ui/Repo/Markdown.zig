@@ -277,16 +277,21 @@ const Builder = struct {
     }
 
     // the focus kind a link follows, or "" when it isn't clickable: web links
-    // are raw links, and a repo path is a files route relative to this file
+    // are raw links, a repo path is a files route relative to this file, and
+    // outside a repo a leading `/` is a page on this site
     fn resolveLink(b: Builder, dest: []const u8) ![]const u8 {
         const aa = b.page_arena.allocator();
         for ([_][]const u8{ "http:", "https:", "mailto:" }) |scheme| {
             if (std.ascii.startsWithIgnoreCase(dest, scheme)) return aa.print("{s}{s}", .{ ui.raw_link_prefix, dest });
         }
         if (hasScheme(dest) or std.mem.startsWith(u8, dest, "//")) return "";
-        const data = b.data orelse return "";
         const end = std.mem.indexOfAny(u8, dest, "?#") orelse dest.len;
         if (end == 0) return "";
+        const data = b.data orelse {
+            if (dest[0] != '/') return "";
+            const route = ui.RoutablePage.fromUrl(dest[0..end]) orelse return "";
+            return aa.print("a:{s}", .{try route.toUrl(b.page_arena)});
+        };
         const decoded = std.Uri.percentDecodeInPlace(try aa.dupe(u8, dest[0..end]));
 
         var segments: std.ArrayList([]const u8) = .empty;
