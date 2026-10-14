@@ -788,6 +788,39 @@ fn trialMergeCheck(
     };
 }
 
+// queue `oid` and its history on `objects`, which reads from `source`, minus
+// what `holder` already has. a repo and its forks start as copies of each other,
+// so walking back to the newest commit `holder` has usually skips nearly all of it.
+pub fn includeMissing(
+    comptime repo_opts: rp.RepoOpts(.xit),
+    objects: *obj.ObjectIterator(.xit, repo_opts),
+    holder: rp.Repo(.xit, repo_opts).State(.read_only),
+    source: rp.Repo(.xit, repo_opts).State(.read_only),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    oid: *const [hash.hexLen(repo_opts.hash)]u8,
+) !void {
+    var held_oid = oid.*;
+    while (true) {
+        var reader_or_err = obj.ObjectReader(.xit, repo_opts).init(holder, io, allocator, &held_oid);
+        if (reader_or_err) |*reader| {
+            reader.deinit();
+            break;
+        } else |err| switch (err) {
+            error.ObjectNotFound => {},
+            else => |e| return e,
+        }
+        var commit = try obj.Object(.xit, repo_opts).init(source, io, allocator, &held_oid);
+        defer commit.deinit();
+        const parent_oids = commit.content.commit.metadata.parent_oids orelse return objects.include(oid);
+        if (parent_oids.len == 0) return objects.include(oid);
+        held_oid = parent_oids[0];
+    }
+    if (std.mem.eql(u8, &held_oid, oid)) return;
+    try objects.include(oid);
+    try objects.exclude(&held_oid);
+}
+
 fn calculateMergeCheck(
     comptime repo_opts: rp.RepoOpts(.xit),
     state: rp.Repo(.xit, repo_opts).State(.read_write),
@@ -805,8 +838,8 @@ fn calculateMergeCheck(
         const fork_state = rp.Repo(.xit, repo_opts).State(.read_only){ .core = &repo.core, .extra = .{ .moment = &fork_moment } };
         var objects = try obj.ObjectIterator(.xit, repo_opts).init(fork_state, io, allocator, .{ .kind = .all });
         defer objects.deinit();
-        try objects.include(&source);
-        try objects.include(&squash);
+        try includeMissing(repo_opts, &objects, state.readOnly(), fork_state, io, allocator, &source);
+        try includeMissing(repo_opts, &objects, state.readOnly(), fork_state, io, allocator, &squash);
         try obj.copyFromObjectIterator(.xit, repo_opts, state, .xit, repo_opts, &objects, io, null);
     }
 
@@ -1193,7 +1226,7 @@ fn mergeInner(
                     const fork_state = State(.read_only){ .core = &repo.core, .extra = .{ .moment = &fork_repo_moment } };
                     var objects = try obj.ObjectIterator(.xit, repo_opts).init(fork_state, ctx.io, ctx.allocator, .{ .kind = .all });
                     defer objects.deinit();
-                    try objects.include(&ctx.selected_oid);
+                    try includeMissing(repo_opts, &objects, state.readOnly(), fork_state, ctx.io, ctx.allocator, &ctx.selected_oid);
                     try obj.copyFromObjectIterator(.xit, repo_opts, state, .xit, repo_opts, &objects, ctx.io, null);
                 }
 
