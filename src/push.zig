@@ -97,6 +97,29 @@ pub fn writeUndo(
 }
 
 // the oid a ref update sends when it has no side: all zeros
+// point HEAD at a pushed branch while the branch it names doesn't exist, so a
+// repo whose first push is only `main` shows it rather than an empty `master`
+fn adoptPushedBranch(
+    comptime repo_opts: rp.RepoOpts(.xit),
+    state: rp.Repo(.xit, repo_opts).State(.read_write),
+    io: std.Io,
+    updates: []const xit.net_server_receive_pack.AppliedRefUpdate,
+) !void {
+    var head_buffer: [rf.MAX_REF_CONTENT_SIZE]u8 = undefined;
+    const head_ref = switch ((try rf.readHead(.xit, repo_opts, state.readOnly(), io, &head_buffer)) orelse return) {
+        .ref => |ref| ref,
+        .oid => return,
+    };
+    if (null != try rf.readRecur(.xit, repo_opts, state.readOnly(), io, .{ .ref = head_ref })) return;
+    for (updates) |update| {
+        if (zeroOid(update.new_oid)) continue;
+        const ref = rf.Ref.initFromPath(update.ref_name, null) orelse continue;
+        // the events branch holds haxy's metadata, not the project
+        if (ref.kind != .head or std.mem.eql(u8, ref.name, evt.events_ref.name)) continue;
+        return rf.replaceHead(.xit, repo_opts, state, io, .{ .ref = ref });
+    }
+}
+
 fn zeroOid(oid: []const u8) bool {
     for (oid) |char| if (char != '0') return false;
     return true;
@@ -172,6 +195,7 @@ pub fn receivePackAndConsume(
             // lets go of the lock.
             const applied = ctx.updates.items.items;
             if (applied.len == 1 and std.mem.eql(u8, applied[0].ref_name, clear_undo_ref)) return error.ClearUndoHistory;
+            try adoptPushedBranch(repo_opts, state, ctx.io, applied);
             try writeReceivedPatches(repo_opts, state, ctx.io, ctx.allocator, ctx.response, ctx.writer);
             if (ctx.sideband.gone) return error.ClientGone;
 
