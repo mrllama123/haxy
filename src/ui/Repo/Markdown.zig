@@ -42,7 +42,8 @@ pub const View = struct {
 
     pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
         self.clearGrid();
-        try self.box.build(allocator, constraint, root_focus);
+        // natural height, since the box would stretch its last block to a min height
+        try self.box.build(allocator, .{ .min_size = .{ .width = constraint.min_size.width, .height = null }, .max_size = constraint.max_size }, root_focus);
         const grid = self.box.getGrid() orelse return;
         try self.box.getFocus().addChild(allocator, self.body, grid.size, 0, 0);
     }
