@@ -699,9 +699,12 @@ pub const View = struct {
         // only files have contents to show; directories and the ".." row leave
         // the pane empty.
         var markdown = false;
+        self.detailScrollFrame().options.top_label.text = "";
         if (self.selectedEntry()) |entry| {
             if (!entry.is_dir) {
                 const path = try childDir(self.session.page_arena.allocator(), self.data.dir, entry.name);
+                // the frame around the contents is labeled with the file's name
+                self.detailScrollFrame().options.top_label.text = try self.session.page_arena.allocator().print(" {s} ", .{entry.name});
                 // with the list hidden beside it, the detail leads with the way
                 // back. an in-page link to this very page, so both hosts hand
                 // its press and enter to detailInput instead of navigating.
