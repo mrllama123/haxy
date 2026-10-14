@@ -443,10 +443,13 @@ pub fn receiveFork(
             .sideband = &sideband,
         });
     };
-    result catch |err| {
-        response.finish(writer, @errorName(err)) catch {};
-        if (err == error.CancelTransaction) return;
-        return err;
+    result catch |err| switch (err) {
+        // a refused push has already written the report saying why
+        error.CancelTransaction => return response.finish(writer, null),
+        else => {
+            response.finish(writer, @errorName(err)) catch {};
+            return err;
+        },
     };
 
     if (!published) return response.finish(writer, null);
