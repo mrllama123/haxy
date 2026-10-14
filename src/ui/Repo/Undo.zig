@@ -370,12 +370,12 @@ pub const View = struct {
 
         // the sub header holds the command that clears the history. a server
         // without ssh has no way to.
-        if (session.data.git_ssh_port) |port| {
+        if (session.data.git_ssh_url) |ssh_url| {
             var header_scroll = try ui.widget.HeaderScroll.init(allocator, session);
             errdefer header_scroll.deinit(allocator);
             {
                 const aa = session.page_arena.allocator();
-                const command = try aa.print("git push ssh://localhost:{d}/{s} :" ++ push.clear_undo_ref, .{ port, data.identity });
+                const command = try aa.print("git push {s}/{s} :" ++ push.clear_undo_ref, .{ ssh_url, data.identity });
                 var copyable_text = try ui.widget.CopyableText.init(allocator, session, &.{.{
                     .text = command,
                     .copyable_text = try aa.print("{s}{s}", .{ session.data.git_ssh_prefix, command }),

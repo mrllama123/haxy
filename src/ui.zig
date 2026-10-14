@@ -2358,9 +2358,9 @@ pub const Session = struct {
     color: bool = true, // false when NO_COLOR is set, which also hides the art
     // the terminal's reported default background, which the art blends toward
     terminal_background: ?Grid.Color.Rgb = null,
-    // port the web UI is served on, for the TUI/SSH footer's "http://localhost:<port>..."
-    // url. null on the web itself (no footer there).
-    web_port: ?u16 = null,
+    // the web UI's url, for the TUI/SSH footer. null on the web itself (no
+    // footer there).
+    web_url: ?[]const u8 = null,
     // the authorized_keys line of the key an ssh session connected with
     ssh_key: ?[]const u8 = null,
     // a host operation requested by a widget
@@ -2583,10 +2583,10 @@ pub const Session = struct {
         // the selected ANSI art. the server serializes one image for WASM so
         // the browser does not need the whole build-generated collection.
         ansi_art: []const u8 = "",
-        // the bound git-service ports. absent in local mode, where remote urls
-        // are not shown.
-        git_http_port: ?u16 = null,
-        git_ssh_port: ?u16 = null,
+        // where git clones and pushes go. absent in local mode, where remote
+        // urls are not shown.
+        git_http_url: ?[]const u8 = null,
+        git_ssh_url: ?[]const u8 = null,
         git_ssh_prefix: []const u8 = "",
         // whether this session views a local repo or the server. unlike `local`
         // (the host-side filesystem source) this travels in the snapshot, so
@@ -3026,8 +3026,8 @@ fn requestRawLink(session: *Session, url: []const u8) !void {
 pub fn terminalWebUrl(allocator: std.mem.Allocator, session: *const Session, path: []const u8) ![]const u8 {
     // an absolute url is already complete
     if (!std.mem.startsWith(u8, path, "/")) return path;
-    return if (session.web_port) |port|
-        try allocator.print("http://localhost:{d}{s}", .{ port, path })
+    return if (session.web_url) |web_url|
+        try allocator.print("{s}{s}", .{ web_url, path })
     else
         path;
 }
@@ -3342,7 +3342,7 @@ pub fn initRoot(allocator: std.mem.Allocator, page: *const Page, session: *Sessi
             try box.children.put(allocator, id, .{ .widget = .{ .background = background }, .rect = null, .min_size = null });
             break :bg_blk id;
         };
-        if (session.web_port != null) {
+        if (session.web_url != null) {
             var footer = try widget.Footer.init(allocator, session);
             errdefer footer.deinit(allocator);
             try box.children.put(allocator, footer.getFocus().id, .{ .widget = .{ .footer = footer }, .rect = null, .min_size = .{ .width = null, .height = 1 } });

@@ -331,14 +331,14 @@ pub fn initNoCommits(allocator: std.mem.Allocator, session: *ui.Session, handle:
     errdefer box.deinit(allocator);
 
     // built first so the text can center over it
-    var remote_maybe: ?CopyableText = if (session.data.host_kind == .server and handle.canWrite()) if (session.data.git_ssh_port) |port| blk: {
+    var remote_maybe: ?CopyableText = if (session.data.host_kind == .server and handle.canWrite()) if (session.data.git_ssh_url) |ssh_url| blk: {
         // only repo pages flag a repo without commits
         const identity = switch (handle.location) {
             .repo => |identity| identity,
             .fork => unreachable,
         };
         const aa = session.page_arena.allocator();
-        const url = try aa.print("ssh://localhost:{d}/{s}", .{ port, identity });
+        const url = try aa.print("{s}/{s}", .{ ssh_url, identity });
         break :blk try CopyableText.init(allocator, session, &.{.{
             .text = url,
             .copyable_text = try aa.print("git remote add origin {s}", .{url}),
@@ -2133,9 +2133,9 @@ pub const CopyableText = struct {
         var ssh_index: ?usize = null;
         switch (handle.location) {
             .repo => |identity| {
-                const http_port = if (handle.read_access == .public) session.data.git_http_port else null;
-                if (http_port) |port| {
-                    const url = try aa.print("http://localhost:{d}/{s}", .{ port, identity });
+                const http_url = if (handle.read_access == .public) session.data.git_http_url else null;
+                if (http_url) |base| {
+                    const url = try aa.print("{s}/{s}", .{ base, identity });
                     choices[count] = .{
                         .selector = "http",
                         .text = url,
@@ -2144,9 +2144,9 @@ pub const CopyableText = struct {
                     };
                     count += 1;
                 }
-                if (session.data.git_ssh_port) |port| {
+                if (session.data.git_ssh_url) |ssh_url| {
                     ssh_index = count;
-                    const url = try aa.print("ssh://localhost:{d}/{s}", .{ port, identity });
+                    const url = try aa.print("{s}/{s}", .{ ssh_url, identity });
                     choices[count] = .{
                         .selector = "ssh",
                         .text = url,
@@ -2156,8 +2156,8 @@ pub const CopyableText = struct {
                     count += 1;
                 }
             },
-            .fork => |f| if (session.data.git_ssh_port) |port| {
-                const url = try aa.print("ssh://localhost:{d}/{s}+{s}", .{ port, f.identity, f.id });
+            .fork => |f| if (session.data.git_ssh_url) |ssh_url| {
+                const url = try aa.print("{s}/{s}+{s}", .{ ssh_url, f.identity, f.id });
                 choices[count] = .{
                     .text = url,
                     .copyable_text = try aa.print("{s}git clone {s}", .{ session.data.git_ssh_prefix, url }),

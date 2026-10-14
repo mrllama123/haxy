@@ -4,75 +4,49 @@ const rp = xit.repo;
 const evt = @import("./event.zig");
 const serve_common = @import("./serve_common.zig");
 
-pub fn runListener(
-    comptime repo_kind: rp.RepoKind,
-    comptime any_repo_opts: rp.AnyRepoOpts(repo_kind),
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    users_dir: []const u8,
-    admin_repo_path: []const u8,
-    net_server: *std.Io.net.Server,
-    tasks: *std.Io.Group,
-    err: *std.Io.Writer,
-) void {
-    const Context = struct {
-        io: std.Io,
-        allocator: std.mem.Allocator,
-        users_dir: []const u8,
-        admin_repo_path: []const u8,
-        err: *std.Io.Writer,
+// whether a web listener request is git's smart http rather than a page
+pub fn isGitRequest(head: *const std.http.Server.Request.Head) bool {
+    const uri = std.Uri.parseAfterScheme("", head.target) catch return false;
+    const handler, _ = findRoute(uri.path.percent_encoded) orelse return false;
+    return switch (handler) {
+        // a page url can end in "/info/refs" too, but never has a query
+        .get_info_refs => if (uri.query) |q| std.mem.startsWith(u8, q.percent_encoded, "service=") else false,
+        .run_service => head.method == .POST,
     };
-
-    const handle = struct {
-        fn h(ctx: Context, stream: std.Io.net.Stream) void {
-            defer stream.close(ctx.io);
-            handleConnection(repo_kind, any_repo_opts, ctx.io, ctx.allocator, ctx.users_dir, ctx.admin_repo_path, stream, ctx.err) catch |request_err| {
-                serve_common.logError(ctx.io, ctx.err, "connection failed: {s}\n", .{@errorName(request_err)});
-            };
-        }
-    }.h;
-
-    serve_common.runListener(io, net_server, tasks, err, "http", Context{
-        .io = io,
-        .allocator = allocator,
-        .users_dir = users_dir,
-        .admin_repo_path = admin_repo_path,
-        .err = err,
-    }, handle);
 }
 
-fn handleConnection(
-    comptime repo_kind: rp.RepoKind,
-    comptime any_repo_opts: rp.AnyRepoOpts(repo_kind),
+pub const GitHandler = *const fn (
     io: std.Io,
     allocator: std.mem.Allocator,
     users_dir: []const u8,
     admin_repo_path: []const u8,
-    stream: std.Io.net.Stream,
+    http_server: *std.http.Server,
+    request: *std.http.Server.Request,
     err: *std.Io.Writer,
-) !void {
-    var send_buffer: [any_repo_opts.net_buffer_size]u8 = @splat(0);
-    var recv_buffer: [any_repo_opts.net_buffer_size]u8 = @splat(0);
-    var conn_br = stream.reader(io, &recv_buffer);
-    var conn_bw = stream.writer(io, &send_buffer);
-    var http_server = std.http.Server.init(&conn_br.interface, &conn_bw.interface);
+) anyerror!void;
 
-    if (http_server.reader.state == .ready) {
-        var request = http_server.receiveHead() catch |receive_err| switch (receive_err) {
-            error.HttpConnectionClosing => return,
-            error.ReadFailed => return,
-            else => |e| return e,
-        };
-
-        handleGitRequest(repo_kind, any_repo_opts, io, allocator, users_dir, admin_repo_path, &http_server, &request) catch |request_err| {
-            serve_common.logError(io, err, "request failed: {s}\n", .{@errorName(request_err)});
-            if (http_server.reader.state == .received_head) {
-                http_server.reader.state = .ready;
-            }
-            try writeSimpleResponse(&http_server, 500, "Internal Server Error", "text/plain", @errorName(request_err));
-        };
-        try http_server.out.flush();
-    }
+// the git request handler for one repo backend, so the web listener needn't be generic
+pub fn gitHandler(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoOpts(repo_kind)) GitHandler {
+    return struct {
+        fn handle(
+            io: std.Io,
+            allocator: std.mem.Allocator,
+            users_dir: []const u8,
+            admin_repo_path: []const u8,
+            http_server: *std.http.Server,
+            request: *std.http.Server.Request,
+            err: *std.Io.Writer,
+        ) anyerror!void {
+            handleGitRequest(repo_kind, any_repo_opts, io, allocator, users_dir, admin_repo_path, http_server, request) catch |request_err| {
+                serve_common.logError(io, err, "request failed: {s}\n", .{@errorName(request_err)});
+                if (http_server.reader.state == .received_head) {
+                    http_server.reader.state = .ready;
+                }
+                try writeSimpleResponse(http_server, 500, "Internal Server Error", "text/plain", @errorName(request_err));
+            };
+            try http_server.out.flush();
+        }
+    }.handle;
 }
 
 fn handleGitRequest(

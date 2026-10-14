@@ -10,9 +10,11 @@ const serve_http = @import("./serve_http.zig");
 const evt = @import("./event.zig");
 
 pub const Options = struct {
-    http_listen: ?[]const u8 = "127.0.0.1:8080",
+    web_listen: []const u8 = "127.0.0.1:8080",
     ssh_listen: ?[]const u8 = "127.0.0.1:8022",
-    wui_listen: []const u8 = "127.0.0.1:8000",
+    // the public urls shown to users, defaulting to localhost and the bound port
+    web_url: ?[]const u8 = null,
+    ssh_url: ?[]const u8 = null,
     data_dir: []const u8 = ".",
     git_ssh_prefix: []const u8 = "",
     fallback_on_address_in_use: bool = false,
@@ -82,42 +84,42 @@ pub fn run(
         defer admin_repo.deinit(io, allocator);
     }
 
-    // create http listener
-
     const port_policy: PortPolicy = if (options.fallback_on_address_in_use) .fallback else .exact;
-    var http_maybe: ?BoundListener = if (options.http_listen) |value| blk: {
-        const address = try parseListenAddress(value);
-        break :blk .{ .address = address, .server = try listen(io, address, port_policy) };
-    } else null;
-    defer if (http_maybe) |*http| http.deinit(io);
 
     // disk-backed store for web login sessions
     const session_store = try web.SessionStore.init(io, data_dir);
     defer session_store.deinit();
 
-    // create wui listener
+    // create web listener
 
-    const wui_listen_address = try parseListenAddress(options.wui_listen);
-    var wui_server = try listen(io, wui_listen_address, port_policy);
-    defer wui_server.deinit(io);
+    const web_listen_address = try parseListenAddress(options.web_listen);
+    var web_server = try listen(io, web_listen_address, port_policy);
+    defer web_server.deinit(io);
+
+    const web_url = options.web_url orelse try allocator.print("http://localhost:{d}", .{web_server.socket.address.getPort()});
+    defer if (options.web_url == null) allocator.free(web_url);
 
     // create ssh listener and its session state
 
-    const git_http_port: ?u16 = if (http_maybe) |*http| http.port() else null;
+    var ssh_url_owned: ?[]const u8 = null;
+    defer if (ssh_url_owned) |url| allocator.free(url);
     var ssh_maybe: ?SshService = if (options.ssh_listen) |value| blk: {
         const address = try parseListenAddress(value);
         var listener = BoundListener{ .address = address, .server = try listen(io, address, port_policy) };
         errdefer listener.deinit(io);
-        const ssh_port = listener.port();
+        const ssh_url = options.ssh_url orelse url_blk: {
+            const url = try allocator.print("ssh://localhost:{d}", .{listener.port()});
+            ssh_url_owned = url;
+            break :url_blk url;
+        };
         break :blk .{
             .listener = listener,
             .host_key = try serve_ssh_protocol.HostKey.loadOrGenerate(io, allocator, data_dir_path),
             .session_handler = .{
                 .admin_repo_path = admin_repo_path,
                 .server = .{ .users_dir = users_dir, .admin_repo_path = admin_repo_path },
-                .wui_port = wui_server.socket.address.getPort(),
-                .git_http_port = git_http_port,
-                .git_ssh_port = ssh_port,
+                .web_url = web_url,
+                .ssh_url = ssh_url,
                 .git_ssh_prefix = options.git_ssh_prefix,
                 .err = err,
             },
@@ -132,13 +134,7 @@ pub fn run(
 
     // run listeners, printing the ports actually bound
 
-    const git_ssh_port: ?u16 = if (ssh_maybe) |*ssh| ssh.listener.port() else null;
-
-    if (http_maybe) |*http| {
-        try err.print("serving HTTP on {s}:{d}, users dir {s}\n", .{ http.address.host, http.port(), users_dir });
-        try err.flush();
-        serve_http.runListener(repo_kind, any_repo_opts, io, allocator, users_dir, admin_repo_path, &http.server, &tasks, err);
-    }
+    const ssh_url: ?[]const u8 = if (ssh_maybe) |*ssh| ssh.session_handler.ssh_url else null;
 
     if (ssh_maybe) |*ssh| {
         try err.print("serving SSH on {s}:{d}, host key ED25519 {s}\n", .{ ssh.listener.address.host, ssh.listener.port(), try ssh.host_key.fingerprint(allocator) });
@@ -146,20 +142,21 @@ pub fn run(
         serve_ssh.runListener(io, allocator, &ssh.host_key, &ssh.session_handler, &ssh.watchdog, &ssh.listener.server, &tasks, err);
     }
 
-    try err.print("serving web UI on http://{s}:{d}/\n", .{ wui_listen_address.host, wui_server.socket.address.getPort() });
+    try err.print("serving web UI and git over HTTP on http://{s}:{d}/, users dir {s}\n", .{ web_listen_address.host, web_server.socket.address.getPort(), users_dir });
     try err.flush();
 
-    runWebListener(io, allocator, &wui_server, &tasks, .{ .server = .{
+    runWebListener(io, allocator, &web_server, &tasks, .{ .server = .{
         .admin_repo_path = admin_repo_path,
         .users_dir = users_dir,
         .session_store = session_store,
-        .git_http_port = git_http_port,
-        .git_ssh_port = git_ssh_port,
+        .web_url = web_url,
+        .ssh_url = ssh_url,
         .git_ssh_prefix = options.git_ssh_prefix,
+        .serve_git = serve_http.gitHandler(repo_kind, any_repo_opts),
     } }, err);
 
     if (@TypeOf(runnable) != void) {
-        try runnable.run(wui_server.socket.address.getPort(), git_http_port, git_ssh_port);
+        try runnable.run(web_url, ssh_url);
     } else {
         try tasks.await(io);
     }
@@ -168,7 +165,7 @@ pub fn run(
 // serve just the web UI for a single local repo, running `runnable` (the
 // local TUI) in the foreground while the listener runs in the background.
 // when the default port is taken, a random ephemeral port is used instead;
-// the bound port is passed to `runnable.run`.
+// the web UI's url is passed to `runnable.run`.
 pub fn runLocal(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -178,16 +175,18 @@ pub fn runLocal(
 ) !void {
     // always fall back, so another instance viewing a second repo just binds
     // its own port
-    const wui_listen_address = try parseListenAddress((Options{}).wui_listen);
-    var wui_server = try listen(io, wui_listen_address, .fallback);
-    defer wui_server.deinit(io);
+    const web_listen_address = try parseListenAddress((Options{}).web_listen);
+    var web_server = try listen(io, web_listen_address, .fallback);
+    defer web_server.deinit(io);
 
     var tasks: std.Io.Group = .init;
     defer tasks.cancel(io);
 
-    runWebListener(io, allocator, &wui_server, &tasks, .{ .local = local }, err);
+    runWebListener(io, allocator, &web_server, &tasks, .{ .local = local }, err);
 
-    try runnable.run(wui_server.socket.address.getPort());
+    const web_url = try allocator.print("http://localhost:{d}", .{web_server.socket.address.getPort()});
+    defer allocator.free(web_url);
+    try runnable.run(web_url);
 }
 
 fn runWebListener(

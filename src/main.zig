@@ -147,8 +147,8 @@ pub fn run(
                 allocator: std.mem.Allocator,
                 session: *ui.Session,
 
-                pub fn run(self: @This(), web_port: u16) !void {
-                    self.session.web_port = web_port;
+                pub fn run(self: @This(), web_url: []const u8) !void {
+                    self.session.web_url = web_url;
                     try ui.run(self.io, self.allocator, self.session, null);
                 }
             };

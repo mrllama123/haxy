@@ -993,14 +993,13 @@ pub fn main(init: std.process.Init) !void {
             io: std.Io,
             key_path: []const u8,
 
-            pub fn run(self: @This(), web_port: u16, http_port: ?u16, ssh_port_maybe: ?u16) !void {
-                _ = web_port;
-                _ = http_port;
-                const ssh_port = ssh_port_maybe orelse return error.SshDisabled;
+            pub fn run(self: @This(), web_url: []const u8, ssh_url_maybe: ?[]const u8) !void {
+                _ = web_url;
+                const ssh_url = ssh_url_maybe orelse return error.SshDisabled;
                 std.debug.print(
                     \\
                     \\connect to the TUI with:
-                    \\  ssh -p {d} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null localhost
+                    \\  ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null {s}
                     \\
                     \\create a git repo and push over SSH:
                     \\  mkdir -p temp-try/client/test
@@ -1009,11 +1008,11 @@ pub fn main(init: std.process.Init) !void {
                     \\  echo "hello" > hello.txt
                     \\  git add hello.txt
                     \\  git commit -m "let there be light"
-                    \\  GIT_SSH_COMMAND='ssh -p {d} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -i {s}' git push localhost:admin:test HEAD:master
+                    \\  GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -i {s}' git push {s}/admin:test HEAD:master
                     \\
                     \\to quit, press enter.
                     \\
-                , .{ ssh_port, ssh_port, self.key_path });
+                , .{ ssh_url, self.key_path, ssh_url });
                 // portable stdin read via std.Io — equivalent to the
                 // std.posix.read(STDIN_FILENO, ...) that doesn't compile
                 // on windows.
@@ -1034,11 +1033,11 @@ pub fn main(init: std.process.Init) !void {
             session: *ui.Session,
             repo: *Repo,
 
-            pub fn run(self: @This(), web_port: u16, http_port: ?u16, ssh_port: ?u16) !void {
+            pub fn run(self: @This(), web_url: []const u8, ssh_url: ?[]const u8) !void {
                 // launch the TUI; the footer points at whatever port was bound
-                self.session.web_port = web_port;
-                self.session.data.git_http_port = http_port;
-                self.session.data.git_ssh_port = ssh_port;
+                self.session.web_url = web_url;
+                self.session.data.git_http_url = web_url;
+                self.session.data.git_ssh_url = ssh_url;
                 try hx.ui.run(self.io, self.allocator, self.session, self.repo);
             }
         };

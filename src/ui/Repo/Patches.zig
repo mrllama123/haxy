@@ -939,8 +939,8 @@ pub fn appendDetails(_: *const Self, allocator: std.mem.Allocator, box: *wgt.Box
     const status_kind = entry.record.event.status.kind();
     const target_branch = entry.record.event.target_branch;
 
-    if (status_kind != .merged and entry.fork_exists) if (session.data.git_ssh_port) |port| {
-        const url = try aa.print("ssh://localhost:{d}/{s}+{s}", .{ port, entry.fork_identity, entry.id });
+    if (status_kind != .merged and entry.fork_exists) if (session.data.git_ssh_url) |ssh_url| {
+        const url = try aa.print("{s}/{s}+{s}", .{ ssh_url, entry.fork_identity, entry.id });
         const push_command = try aa.print("git push {s} HEAD:patch", .{url});
         const clone_command = try aa.print("git clone {s}", .{url});
         const merge_command = try aa.print("git fetch '{s}' refs/heads/patch && git merge FETCH_HEAD", .{url});

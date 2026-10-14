@@ -30,9 +30,9 @@ pub const SessionHandler = struct {
     admin_repo_path: []const u8,
     // where event writes go
     server: evt.Host.Server,
-    wui_port: u16, // port the web UI is served on, shown in the TUI footer's url
-    git_http_port: ?u16,
-    git_ssh_port: ?u16,
+    // the web UI's url, shown in the TUI footer and shared by git's http clones
+    web_url: []const u8,
+    ssh_url: ?[]const u8,
     git_ssh_prefix: []const u8,
     err: *std.Io.Writer,
 
@@ -231,9 +231,9 @@ fn runTui(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySiz
     var ui_session = try ui.Session.init(&session_arena, &repo, .{});
     ui_session.is_terminal = true;
     ui_session.color = color;
-    ui_session.web_port = handler.wui_port;
-    ui_session.data.git_http_port = handler.git_http_port;
-    ui_session.data.git_ssh_port = handler.git_ssh_port;
+    ui_session.web_url = handler.web_url;
+    ui_session.data.git_http_url = handler.web_url;
+    ui_session.data.git_ssh_url = handler.ssh_url;
     ui_session.data.git_ssh_prefix = handler.git_ssh_prefix;
     // let page builders open on-disk repos
     ui_session.io = io;

@@ -5,6 +5,7 @@ const obj = xit.object;
 const hash = xit.hash;
 const evt = @import("./event.zig");
 const serve_common = @import("./serve_common.zig");
+const serve_http = @import("./serve_http.zig");
 const ui = @import("./ui.zig");
 const fork = @import("./fork.zig");
 const pch = @import("./patch.zig");
@@ -45,9 +46,11 @@ pub const Host = union(evt.HostKind) {
         admin_repo_path: []const u8,
         users_dir: []const u8,
         session_store: SessionStore,
-        git_http_port: ?u16,
-        git_ssh_port: ?u16,
+        // the public url of this listener, which git's http clones share
+        web_url: []const u8,
+        ssh_url: ?[]const u8,
         git_ssh_prefix: []const u8,
+        serve_git: serve_http.GitHandler,
     },
 
     // where this host's event writes go
@@ -125,6 +128,15 @@ pub fn handleConnection(
             error.ReadFailed => break,
             else => |e| return e,
         };
+
+        switch (host) {
+            .server => |server| if (serve_http.isGitRequest(&request.head)) {
+                try server.serve_git(io, allocator, server.users_dir, server.admin_repo_path, &http_server, &request, err);
+                // git's responses end with "Connection: close"
+                break;
+            },
+            .local => {},
+        }
 
         handleRequest(io, &request, allocator, host) catch |request_err| {
             serve_common.logError(io, err, "web ui request failed: {s}\n", .{@errorName(request_err)});
@@ -327,8 +339,8 @@ fn handleRequest(
             },
         }
 
-        const git_http_port: ?u16, const git_ssh_port: ?u16, const git_ssh_prefix: []const u8 = switch (host) {
-            .server => |server| .{ server.git_http_port, server.git_ssh_port, server.git_ssh_prefix },
+        const git_http_url: ?[]const u8, const git_ssh_url: ?[]const u8, const git_ssh_prefix: []const u8 = switch (host) {
+            .server => |server| .{ server.web_url, server.ssh_url, server.git_ssh_prefix },
             .local => .{ null, null, "" },
         };
         var session_data: ui.Session.Data = .{
@@ -337,8 +349,8 @@ fn handleRequest(
             .sync_failure = sync_failure,
             .current_page = current_page,
             .host_kind = std.meta.activeTag(host),
-            .git_http_port = git_http_port,
-            .git_ssh_port = git_ssh_port,
+            .git_http_url = git_http_url,
+            .git_ssh_url = git_ssh_url,
             .git_ssh_prefix = git_ssh_prefix,
         };
         // a page that can't be built shows the not-found page instead

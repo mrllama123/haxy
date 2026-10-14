@@ -19,8 +19,9 @@ fn commandHelp(command_kind: CommandKind) Help {
             \\a long-running server forwarding receive-pack and upload-pack.
             ,
             .example =
-            \\haxy serve --http-listen 127.0.0.1:8080 --ssh-listen 127.0.0.1:8022 --wui-listen 127.0.0.1:8000 --data-dir /srv/git
-            \\use "none" for --http-listen or --ssh-listen to disable that service.
+            \\haxy serve --web-listen 127.0.0.1:8080 --ssh-listen 127.0.0.1:8022 --data-dir /srv/git
+            \\use "none" for --ssh-listen to disable ssh. git clones over HTTP share the web UI's listener.
+            \\--web-url and --ssh-url set the public urls shown to users, like https://example.com and ssh://example.com.
             ,
         },
     };
@@ -83,9 +84,10 @@ pub const CommandArgs = struct {
     // flags that can have a value associated with them
     // must be included here
     const value_flags = std.StaticStringMap(void).initComptime(.{
-        .{"--http-listen"},
+        .{"--web-listen"},
         .{"--ssh-listen"},
-        .{"--wui-listen"},
+        .{"--web-url"},
+        .{"--ssh-url"},
         .{"--data-dir"},
     });
 
@@ -201,15 +203,14 @@ fn serveOptions(cmd_args: *CommandArgs) !?srv.Options {
     if (cmd_args.positional_args.len != 0) return null;
 
     var options: srv.Options = .{};
-    if (cmd_args.get("--http-listen")) |value_maybe| {
-        const value = value_maybe orelse return error.HttpListenNeedsValue;
-        options.http_listen = if (std.mem.eql(u8, value, "none")) null else value;
-    }
+    if (cmd_args.get("--web-listen")) |value_maybe| options.web_listen = value_maybe orelse return error.WebListenNeedsValue;
     if (cmd_args.get("--ssh-listen")) |value_maybe| {
         const value = value_maybe orelse return error.SshListenNeedsValue;
         options.ssh_listen = if (std.mem.eql(u8, value, "none")) null else value;
     }
-    if (cmd_args.get("--wui-listen")) |value_maybe| options.wui_listen = value_maybe orelse return error.WuiListenNeedsValue;
+    // urls are joined with "/" + a path
+    if (cmd_args.get("--web-url")) |value_maybe| options.web_url = std.mem.trimEnd(u8, value_maybe orelse return error.WebUrlNeedsValue, "/");
+    if (cmd_args.get("--ssh-url")) |value_maybe| options.ssh_url = std.mem.trimEnd(u8, value_maybe orelse return error.SshUrlNeedsValue, "/");
     if (cmd_args.get("--data-dir")) |value_maybe| options.data_dir = value_maybe orelse return error.DataDirNeedsValue;
     return options;
 }

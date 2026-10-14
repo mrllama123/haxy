@@ -149,11 +149,11 @@ fn runServer(
     const haxy_path = try std.Io.Dir.path.join(allocator, &.{ cwd_path, "zig-out/bin/haxy" });
     defer allocator.free(haxy_path);
 
-    const http_listen_arg = std.fmt.comptimePrint("127.0.0.1:{}", .{port});
+    const web_listen_arg = std.fmt.comptimePrint("127.0.0.1:{}", .{port});
     const ssh_listen_arg = std.fmt.comptimePrint("127.0.0.1:{}", .{port + 1});
 
     const process = try std.process.spawn(io, .{
-        .argv = &.{ haxy_path, "serve", "--http-listen", http_listen_arg, "--ssh-listen", ssh_listen_arg, "--data-dir", temp_path },
+        .argv = &.{ haxy_path, "serve", "--web-listen", web_listen_arg, "--ssh-listen", ssh_listen_arg, "--data-dir", temp_path },
         .stdin = .ignore,
         .stdout = .ignore,
         .stderr = .ignore,
