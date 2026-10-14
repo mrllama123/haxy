@@ -53,6 +53,7 @@ pub const CreateInput = struct {
     user_id: [evt.event_id_size]u8,
     repo_id: [evt.event_id_size]u8,
     repo_user_id: [evt.event_id_size]u8,
+    repo_name: []const u8,
     title: []const u8,
     description: []const u8,
     labels: []const u8,
@@ -241,6 +242,7 @@ fn copyTarget(
         .event = .{ .fork = .{
             .repo_id = std.fmt.bytesToHex(input.repo_id, .lower),
             .repo_user_id = std.fmt.bytesToHex(input.repo_user_id, .lower),
+            .repo_name = input.repo_name,
         } },
     }});
 }

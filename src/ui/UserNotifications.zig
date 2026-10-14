@@ -79,38 +79,39 @@ pub fn logOut(session: *ui.Session) !void {
 const repos_label = "view repos";
 const logout_label = "logout";
 
-// the notifications, user settings and ssh keys sub tabs over their content, with the logout button across from them
+// the notifications, user settings, ssh keys and delete sub tabs over their content, with the logout button across from them
 pub const View = struct {
     box: wgt.Box(ui.Widget),
     data: *const Self,
     session: *ui.Session,
     // the sub tabs' ids then the repos and logout buttons', in header order
-    control_ids: [5]usize,
+    control_ids: [6]usize,
     // the sub tab whose content shows
     view_index: usize,
 
     const header_index = 0;
     const content_index = 1;
     // the sub tabs come first in `control_ids`
-    const tab_count = 3;
-    const repos_index = 3;
-    const logout_index = 4;
+    const tab_count = 4;
+    const repos_index = 4;
+    const logout_index = 5;
 
     // `user_route` is the page's user tab route
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session, user_route: ui.RoutablePage) !View {
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .vert });
         errdefer box.deinit(allocator);
 
-        var control_ids: [5]usize = undefined;
+        var control_ids: [6]usize = undefined;
         const settings_route = user_route.withUserTab(.{ .view = .settings });
         const keys_route = user_route.withUserTab(.{ .view = .keys });
+        const delete_route = user_route.withUserTab(.{ .view = .delete });
         {
             var header_scroll = try ui.widget.HeaderScroll.init(allocator, session);
             errdefer header_scroll.deinit(allocator);
             const header = header_scroll.row();
             const on_tab = std.meta.activeTag(session.data.current_page) == std.meta.activeTag(user_route);
-            const routes = [_]ui.RoutablePage{ user_route.withUserTab(.{}), settings_route, keys_route };
-            for ([_]ui.RoutablePage.UserView{ .notifications, .settings, .keys }, [_][]const u8{ "notifications", "user settings", "ssh keys" }, routes, 0..) |view, label, route, index| {
+            const routes = [_]ui.RoutablePage{ user_route.withUserTab(.{}), settings_route, keys_route, delete_route };
+            for ([_]ui.RoutablePage.UserView{ .notifications, .settings, .keys, .delete }, [_][]const u8{ "notifications", "user settings", "ssh keys", "delete user" }, routes, 0..) |view, label, route, index| {
                 var tab = try wgt.TextBox.init(allocator, label, .{ .border = .hidden, .round_corners = true, .wrap_kind = .none });
                 errdefer tab.deinit(allocator);
                 tab.getFocus().mode = .all;
@@ -192,6 +193,11 @@ pub const View = struct {
                 var keys = try ui.UserKeys.View.init(allocator, &data.ssh_keys, session, keys_route);
                 errdefer keys.deinit(allocator);
                 try stack.children.put(allocator, keys.getFocus().id, .{ .user_keys = keys });
+            }
+            {
+                var delete = try ui.Delete.View.init(allocator, .{ .target = .{ .user = session.data.user_name orelse unreachable } }, session, delete_route);
+                errdefer delete.deinit(allocator);
+                try stack.children.put(allocator, delete.getFocus().id, .{ .delete_form = delete });
             }
             stack.getFocus().child_id = stack.children.keys()[@backingInt(data.view)];
             try box.children.put(allocator, stack.getFocus().id, .{ .widget = .{ .stack = stack }, .rect = null, .min_size = null });

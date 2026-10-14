@@ -6,6 +6,8 @@ const hash = xit.hash;
 repo_id: [evt.event_id_size * 2]u8,
 // the target repo's owner, whose user repo holds the target
 repo_user_id: [evt.event_id_size * 2]u8,
+// the target repo's name when forked, which outlives a deleted target
+repo_name: []const u8,
 stage: Stage = .draft,
 
 // what the db stores: the event's data plus the commit-derived fields
@@ -32,6 +34,7 @@ pub const repo_to_draft_id_set_key = "repo->draft-id-set";
 fn validate(record: Record) !void {
     _ = try evt.parseEventId(&record.event.repo_id);
     _ = try evt.parseEventId(&record.event.repo_user_id);
+    try evt.Repo.validateName(record.event.repo_name);
 }
 
 pub fn consume(

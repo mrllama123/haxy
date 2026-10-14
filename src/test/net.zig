@@ -562,6 +562,7 @@ fn testPushFork(
             .user_id = user_id,
             .repo_id = repo_id,
             .repo_user_id = user_id,
+            .repo_name = "target",
             .title = "add a feature",
             .description = "a draft patch",
             .labels = "enhancement",

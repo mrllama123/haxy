@@ -303,7 +303,7 @@ pub const View = struct {
             var text_box = try wgt.TextBox.init(allocator, ui.Repo.Settings.tab_label, .{ .border = .single, .round_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().mode = .all;
-            const selected = current_tag == .repo_settings or current_tag == .repo_members or current_tag == .repo_branches;
+            const selected = current_tag == .repo_settings or current_tag == .repo_members or current_tag == .repo_branches or current_tag == .repo_delete;
             text_box.getFocus().kind = .{ .custom = try ui.inPageTabLink(session, route, selected) };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
             if (selected) selected_tab = text_box.getFocus().id;

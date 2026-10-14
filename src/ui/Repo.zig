@@ -318,8 +318,11 @@ pub fn init(
                             if (session.data.host_kind == .server and handle.canUndo()) {
                                 // a server page always resolved its repo id
                                 const repo_id = repo_id_maybe orelse unreachable;
+                                const identity = try arena.allocator().dupe(u8, repo_identity.identity);
+                                // only the repo's creator may delete it, never a granted owner
+                                const creator = if (session.userId()) |user_id| std.mem.eql(u8, &user_id, &owner_id) else false;
                                 settings = .{
-                                    .identity = try arena.allocator().dupe(u8, repo_identity.identity),
+                                    .identity = identity,
                                     .name = repo.event.name,
                                     .description = repo.event.description,
                                     .access = repo.event.read_access,
@@ -330,10 +333,12 @@ pub fn init(
                                     .view = switch (route) {
                                         .repo_members => .members,
                                         .repo_branches => .branches,
+                                        .repo_delete => .delete,
                                         else => .settings,
                                     },
                                     .members = try Members.init(io, gpa, arena, session.haxy_moment orelse return error.NoMoment, session.users_dir orelse return error.NoMoment, repo_identity.identity, &owner_id, &repo_id, members_route.start, if (members_route.confirm) |action| .{ .action = action, .name = members_route.user.slice() } else null),
                                     .branches = try Branches.init(arena, repo_identity.identity, repo.event),
+                                    .delete = if (creator) .{ .target = .{ .repo = identity } } else null,
                                 };
                             }
                             // tabs switch in-page, so every tab's data is read here
@@ -397,7 +402,8 @@ pub fn init(
         };
     };
     if (route == .repo_undo and undo_data == null) return error.NotFound;
-    if ((route == .repo_settings or route == .repo_members or route == .repo_branches) and settings == null) return error.NotFound;
+    if ((route == .repo_settings or route == .repo_members or route == .repo_branches or route == .repo_delete) and settings == null) return error.NotFound;
+    if (settings) |value| if (route == .repo_delete and value.delete == null) return error.NotFound;
     discussions.repo_source = source;
     issues.repo_source = source;
     patches.repo_source = source;

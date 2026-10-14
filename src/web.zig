@@ -158,7 +158,7 @@ fn handleRequest(
         switch (host) {
             .server => |server| {
                 // "repo/new" and "user/new" come before "new", which would claim them
-                const PostRoute = enum { login, logout, @"repo/new", @"user/new", user, addkey, removekey, settings, grant, revoke, promote, demote, protect, unprotect, new, edit, remove, open, close, resolve, publish, merge, squash, attach, assign, unassign, subscribe, mute, undo };
+                const PostRoute = enum { login, logout, @"repo/new", @"user/new", user, addkey, removekey, delete, settings, grant, revoke, promote, demote, protect, unprotect, new, edit, remove, open, close, resolve, publish, merge, squash, attach, assign, unassign, subscribe, mute, undo };
                 inline for (@typeInfo(PostRoute).@"enum".field_names) |name| {
                     const suffix = "/" ++ name;
                     if (std.mem.endsWith(u8, path, suffix)) {
@@ -171,6 +171,7 @@ fn handleRequest(
                             .user => handleUserSettings(io, request, allocator, base, server.admin_repo_path, server.users_dir, server.session_store),
                             .addkey => handleUserKeyAdd(io, request, allocator, base, server.admin_repo_path, server.users_dir, server.session_store),
                             .removekey => handleUserKeyRemove(io, request, allocator, base, server.admin_repo_path, server.users_dir, server.session_store),
+                            .delete => handleDelete(io, request, allocator, base, server),
                             .settings => handleRepoSettings(io, request, allocator, path, host),
                             .grant => handleMembers(io, request, allocator, base, host, .grant),
                             .revoke => handleMembers(io, request, allocator, base, host, .revoke),
@@ -999,6 +1000,62 @@ fn handleUserKeyRemove(
     });
 }
 
+// delete the repo, fork or user the delete tab url `base` names, as its main
+// owner. a failure goes back to the tab.
+fn handleDelete(io: std.Io, request: *std.http.Server.Request, allocator: std.mem.Allocator, base: []const u8, server: @FieldType(Host, "server")) !void {
+    const user_id = requestUserId(request, server.session_store) orelse return respondLoginRequired(request);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = server.admin_repo_path });
+    defer admin_repo.deinit(io, allocator);
+    const user = (try ui.activeUser(try evt.currentMoment(evt.admin_repo_opts, &admin_repo), &arena, user_id)) orelse return respondLoginRequired(request);
+
+    const route = ui.RoutablePage.fromUrl(base) orelse return respondDeleteNotFound(request);
+    const target: ui.Delete.Target = switch (route) {
+        .repo_delete => |*name| .{ .repo = name.slice() },
+        .fork_delete => |*f| .{ .fork = .{ .identity = f.name.slice(), .id = f.id.bytes } },
+        else => if (route.userTab().view == .delete) .{ .user = user.event.name } else return respondDeleteNotFound(request),
+    };
+
+    const body = try readFormBody(request, allocator);
+    defer allocator.free(body);
+    const confirm = (try parseFormField(arena.allocator(), body, "confirm")) orelse "";
+    const password = (try parseFormField(arena.allocator(), body, "password")) orelse "";
+
+    const failure = ui.Delete.perform(io, allocator, server.users_dir, &admin_repo, user_id, target, confirm, password) catch |err| switch (err) {
+        error.NotFound => return respondDeleteNotFound(request),
+        else => return err,
+    };
+    if (failure) |value| return respondFormFailure(request, allocator, server.session_store, base, .{ .delete = .{ .failure = value, .target = std.meta.activeTag(target), .confirm = confirm } });
+
+    switch (target) {
+        .repo, .fork => {
+            const location = try arena.allocator().print("/{s}", .{user.event.name});
+            try request.respond("", .{ .status = .see_other, .keep_alive = false, .extra_headers = &.{.{ .name = "location", .value = location }} });
+        },
+        // log the deleted user out, as a logout does
+        .user => {
+            if (getCookieValue(request, cookie_name)) |token| server.session_store.remove(token);
+            try request.respond("", .{
+                .status = .see_other,
+                .keep_alive = false,
+                .extra_headers = &.{
+                    .{ .name = "location", .value = "/" },
+                    .{ .name = "set-cookie", .value = cookie_name ++ "=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0" },
+                },
+            });
+        },
+    }
+}
+
+fn respondDeleteNotFound(request: *std.http.Server.Request) !void {
+    try request.respond("nothing to delete", .{
+        .status = .not_found,
+        .keep_alive = false,
+        .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+    });
+}
+
 fn respondKeyNotFound(request: *std.http.Server.Request) !void {
     try request.respond("ssh key not found", .{
         .status = .not_found,
@@ -1090,11 +1147,13 @@ fn handleThreadNew(
         }
         const repo_id = evt.parseEventId(std.Io.Dir.path.basename(request_repo.source.path)) catch return respondRemoveNotFound(request);
         const repo_user_id = actor.repo_user_id orelse unreachable;
+        const identity = ui.RoutablePage.RepoIdentity.parse(repoBaseIdentity(base) orelse return respondRemoveNotFound(request)) orelse return respondRemoveNotFound(request);
         const fork_path = try fork.create(.{}, io, allocator, server.users_dir, .{
             .id = event_id_hex,
             .user_id = user_id,
             .repo_id = repo_id,
             .repo_user_id = repo_user_id,
+            .repo_name = identity.name,
             .title = title,
             .description = description,
             .labels = labels,

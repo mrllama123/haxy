@@ -2190,6 +2190,26 @@ pub fn updateRepo(
     }});
 }
 
+// remove the repo `repo_id` from its owner's user repo, then its dir. tombstone
+// first so a missing repo never remains visible
+pub fn deleteRepo(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    users_dir: []const u8,
+    owner_id: *const [event_id_size]u8,
+    repo_id: *const [event_id_size]u8,
+    author: CommitAuthor,
+) !void {
+    {
+        var user_repo = (try openUserRepo(io, allocator, users_dir, owner_id)) orelse return error.NotFound;
+        defer user_repo.deinit(io, allocator);
+        try remove(.{ .server = .{ .users_dir = users_dir } }, .user, .xit, user_repo_opts, io, allocator, &user_repo, repo_id, .repo, author);
+    }
+    const path = try repoPath(allocator, users_dir, owner_id, repo_id);
+    defer allocator.free(path);
+    try std.Io.Dir.cwd().deleteTree(io, path);
+}
+
 // grant `user_id` `role` on the repo `repo_id` in its owner's user repo,
 // replacing any role they held
 pub fn grantRole(
@@ -2371,6 +2391,22 @@ pub fn updateUser(
         .author = .{ .name = event.name, .email = email },
         .event = .{ .user = event },
     }});
+}
+
+// remove a user from the admin repo, then their dir with every repo and fork
+// in it. tombstone first so a missing user never remains visible
+pub fn deleteUser(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    users_dir: []const u8,
+    admin_repo: *rp.Repo(.xit, admin_repo_opts),
+    user_id: *const [event_id_size]u8,
+    author: CommitAuthor,
+) !void {
+    try remove(.{ .server = .{ .users_dir = users_dir } }, .admin, .xit, admin_repo_opts, io, allocator, admin_repo, user_id, .user, author);
+    const path = try std.Io.Dir.path.join(allocator, &.{ users_dir, &std.fmt.bytesToHex(user_id.*, .lower) });
+    defer allocator.free(path);
+    try std.Io.Dir.cwd().deleteTree(io, path);
 }
 
 // add an authorized_keys line to the user's ssh keys

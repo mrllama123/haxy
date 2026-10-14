@@ -159,8 +159,10 @@ pub const PatchWithId = struct {
     commit_count: ?u64 = null,
     no_changes: bool = false,
     fork_exists: bool = false,
-    // the name of the user whose fork backs the patch
-    forker: []const u8 = "",
+    // the url identity of the fork backing the patch: its forker and the repo name it was forked under
+    fork_identity: []const u8 = "",
+    // whether the fork's target is gone, which leaves the fork fetchable but not pushable
+    target_deleted: bool = false,
     mergeability: pch.Mergeability = .{},
 };
 
@@ -264,16 +266,9 @@ pub fn listRoute(identity: []const u8, status: Status, selected: []const u8) ?ui
     return ui.RoutablePage.repoPatchesRoute(identity, status, selected);
 }
 
-// a fork route's identity names the forker and the target repo
-fn forkIdentity(buffer: []u8, identity: []const u8, entry: PatchWithId) ![]const u8 {
-    const repo_identity = ui.RoutablePage.RepoIdentity.parse(identity) orelse return error.RouteTooLong;
-    return std.fmt.bufPrint(buffer, "{s}:{s}", .{ entry.forker, repo_identity.name }) catch error.RouteTooLong;
-}
-
 pub fn commitsRoute(identity: []const u8, entry: PatchWithId) !?ui.RoutablePage {
-    var buffer: [ui.RoutablePage.repo_identity_max_len]u8 = undefined;
     if (entry.fork_exists and entry.record.event.status.kind() != .merged)
-        return ui.RoutablePage.forkCommitsRoute(try forkIdentity(&buffer, identity, entry), entry.id, "") orelse error.RouteTooLong;
+        return ui.RoutablePage.forkCommitsRoute(entry.fork_identity, entry.id, "") orelse error.RouteTooLong;
     if (entry.revision_oid.len == 0 or entry.base_oid.len == 0) return null;
     return ui.RoutablePage.repoCommitsRoute(identity, .object, entry.revision_oid, entry.base_oid) orelse error.RouteTooLong;
 }
@@ -284,10 +279,7 @@ pub fn diffRoute(identity: []const u8, entry: PatchWithId) !?ui.RoutablePage {
         // merged patches show what actually landed, including conflict resolutions
         .merged => |merged| merged.patchrev_id,
         .open, .closed => blk: {
-            if (entry.fork_exists) {
-                var buffer: [ui.RoutablePage.repo_identity_max_len]u8 = undefined;
-                return ui.RoutablePage.forkDiffRoute(try forkIdentity(&buffer, identity, entry), entry.id, "", "", 0, "") orelse error.RouteTooLong;
-            }
+            if (entry.fork_exists) return ui.RoutablePage.forkDiffRoute(entry.fork_identity, entry.id, "", "", 0, "") orelse error.RouteTooLong;
             if (patch.source_branch == null) return null;
             break :blk (patch.revision orelse return null).id;
         },
@@ -364,12 +356,14 @@ pub fn create(
     const user_id = actor.user_id orelse return error.NotFound;
     const repo_id = data.repo_id orelse return error.NotFound;
     const repo_user_id = actor.repo_user_id orelse return error.NotFound;
+    const identity = ui.RoutablePage.RepoIdentity.parse(data.identity) orelse return error.NotFound;
     if (!evt.Patch.branchValid(target_branch) or !try repo_source.hasBranch(io, allocator, target_branch)) return error.InvalidTargetBranch;
     const fork_path = try fork.create(.{}, io, allocator, users_dir, .{
         .id = id,
         .user_id = user_id,
         .repo_id = repo_id,
         .repo_user_id = repo_user_id,
+        .repo_name = identity.name,
         .title = title,
         .description = description,
         .labels = labels,
@@ -767,9 +761,12 @@ fn setPatchDetails(
         // a fork-backed patch's fork lives in its forker's user repo
         if (admin_moment) |moment| if (users_dir) |dir| if (item.record.event.source_branch == null) {
             if (try fork.readForkerId(&config.sections, &id)) |forker_id| {
-                if (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, &forker_id)) |forker| item.forker = forker.event.name;
-                const record = try evt.readForkById(io, arena.child_allocator, arena, dir, &forker_id, &id);
-                item.fork_exists = if (record) |value| !value.removed else false;
+                if (try evt.readForkById(io, arena.child_allocator, arena, dir, &forker_id, &id)) |record| if (!record.removed) {
+                    if (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, &forker_id)) |forker| {
+                        item.fork_exists = true;
+                        item.fork_identity = try arena.allocator().print("{s}:{s}", .{ forker.event.name, record.event.repo_name });
+                    }
+                };
             }
         };
         const target_branch = item.record.event.target_branch;
@@ -869,7 +866,9 @@ fn loadDraftWindow(
         // a fork shares its target's hash kind
         var fork_repo = rp.Repo(.xit, .{ .hash = repo_opts.hash }).open(io, arena.child_allocator, .{ .path = path, .require_repo_root = true }) catch continue;
         defer fork_repo.deinit(io, arena.child_allocator);
-        const entry = (try loadDraftEntry(repo_kind, repo_opts, arena, io, admin_moment, &fork_repo, target_repo, id, user_name)) orelse continue;
+        const record = (try evt.Fork.readById(evt.UserDB, evt.user_repo_opts.hash, user_moment, arena, &id)) orelse continue;
+        const fork_identity = try aa.print("{s}:{s}", .{ user_name, record.event.repo_name });
+        const entry = (try loadDraftEntry(repo_kind, repo_opts, arena, io, admin_moment, &fork_repo, target_repo, id, fork_identity)) orelse continue;
         try items.append(aa, entry);
     }
     return .{
@@ -889,7 +888,7 @@ pub fn loadDraftEntry(
     fork_repo: *rp.Repo(.xit, .{ .hash = repo_opts.hash }),
     target_repo: *rp.Repo(repo_kind, repo_opts),
     id: [evt.event_id_size]u8,
-    forker: []const u8,
+    fork_identity: []const u8,
 ) !?PatchWithId {
     const aa = arena.allocator();
     const id_hex = std.fmt.bytesToHex(id, .lower);
@@ -911,7 +910,7 @@ pub fn loadDraftEntry(
         .commit_count = commit_count,
         .no_changes = if (target_oid) |oid| std.mem.eql(u8, &oid, &fork_oid) else false,
         .fork_exists = true,
-        .forker = try aa.dupe(u8, forker),
+        .fork_identity = try aa.dupe(u8, fork_identity),
     };
 }
 
@@ -935,18 +934,17 @@ const new_tab_label = "new";
 const drafts_tab_label = "drafts";
 const conflicts_tab_label = "conflicts";
 
-pub fn appendDetails(self: *const Self, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), session: *ui.Session, entry: Entry) !void {
+pub fn appendDetails(_: *const Self, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), session: *ui.Session, entry: Entry) !void {
     const aa = session.page_arena.allocator();
     const status_kind = entry.record.event.status.kind();
     const target_branch = entry.record.event.target_branch;
 
     if (status_kind != .merged and entry.fork_exists) if (session.data.git_ssh_port) |port| {
-        var buffer: [ui.RoutablePage.repo_identity_max_len]u8 = undefined;
-        const url = try aa.print("ssh://localhost:{d}/{s}+{s}", .{ port, try forkIdentity(&buffer, self.identity, entry), entry.id });
+        const url = try aa.print("ssh://localhost:{d}/{s}+{s}", .{ port, entry.fork_identity, entry.id });
         const push_command = try aa.print("git push {s} HEAD:patch", .{url});
         const clone_command = try aa.print("git clone {s}", .{url});
         const merge_command = try aa.print("git fetch '{s}' refs/heads/patch && git merge FETCH_HEAD", .{url});
-        const choices: [3]ui.widget.CopyableText.Choice = .{
+        const choices = [_]ui.widget.CopyableText.Choice{
             .{
                 .selector = "push",
                 .text = push_command,
@@ -966,7 +964,7 @@ pub fn appendDetails(self: *const Self, allocator: std.mem.Allocator, box: *wgt.
                 .label = " merge this patch locally ",
             },
         };
-        var copyable_text = try ui.widget.CopyableText.init(allocator, session, &choices, 0);
+        var copyable_text = try ui.widget.CopyableText.init(allocator, session, if (entry.target_deleted) choices[1..] else &choices, 0);
         errdefer copyable_text.deinit(allocator);
         try box.children.put(allocator, copyable_text.getFocus().id, .{ .widget = .{ .copyable_text = copyable_text }, .rect = null, .min_size = null });
     };

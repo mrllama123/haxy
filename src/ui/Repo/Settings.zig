@@ -30,9 +30,11 @@ issue_role: ?evt.Repo.Role,
 patch_role: ?evt.Repo.Role,
 hash_kind: hash.HashKind,
 // the sub tab the route names
-view: enum { settings, members, branches },
+view: enum { settings, members, branches, delete },
 members: Members,
 branches: Branches,
+// the delete sub tab's form, for the repo's creator only
+delete: ?ui.Delete,
 
 const Self = @This();
 
@@ -62,7 +64,7 @@ pub fn labelRole(label: []const u8) error{InvalidRole}!?evt.Repo.Role {
     return error.InvalidRole;
 }
 
-// the repo settings, members and branches sub tabs over their content
+// the repo settings, members, branches and delete sub tabs over their content
 pub const View = struct {
     box: wgt.Box(ui.Widget),
 
@@ -78,11 +80,15 @@ pub const View = struct {
             errdefer header_scroll.deinit(allocator);
             const header = header_scroll.row();
             const on_tab = switch (session.data.current_page) {
-                .repo_settings, .repo_members, .repo_branches => true,
+                .repo_settings, .repo_members, .repo_branches, .repo_delete => true,
                 else => false,
             };
-            const routes = [_]?ui.RoutablePage{ ui.RoutablePage.repoSettingsRoute(data.identity), ui.RoutablePage.repoMembersRoute(data.identity, 0), ui.RoutablePage.repoBranchesRoute(data.identity) };
-            for ([_]@FieldType(Self, "view"){ .settings, .members, .branches }, [_][]const u8{ "repo settings", "members", "branches" }, routes) |view, label, route| {
+            const routes = [_]?ui.RoutablePage{ ui.RoutablePage.repoSettingsRoute(data.identity), ui.RoutablePage.repoMembersRoute(data.identity, 0), ui.RoutablePage.repoBranchesRoute(data.identity), ui.RoutablePage.repoDeleteRoute(data.identity) };
+            const views = [_]@FieldType(Self, "view"){ .settings, .members, .branches, .delete };
+            const labels = [_][]const u8{ "repo settings", "members", "branches", "delete repo" };
+            // the delete tab is last, so leaving it out keeps the stack's order
+            const tab_count = if (data.delete != null) views.len else views.len - 1;
+            for (views[0..tab_count], labels[0..tab_count], routes[0..tab_count]) |view, label, route| {
                 var tab = try wgt.TextBox.init(allocator, label, .{ .border = .hidden, .round_corners = true, .wrap_kind = .none });
                 errdefer tab.deinit(allocator);
                 tab.getFocus().mode = .all;
@@ -111,6 +117,11 @@ pub const View = struct {
                 var branches = try Branches.View.init(allocator, &data.branches, session);
                 errdefer branches.deinit(allocator);
                 try stack.children.put(allocator, branches.getFocus().id, .{ .repo_branches = branches });
+            }
+            if (data.delete) |delete| {
+                var view = try ui.Delete.View.init(allocator, delete, session, ui.RoutablePage.repoDeleteRoute(data.identity) orelse return error.RouteTooLong);
+                errdefer view.deinit(allocator);
+                try stack.children.put(allocator, view.getFocus().id, .{ .delete_form = view });
             }
             stack.getFocus().child_id = stack.children.keys()[@backingInt(data.view)];
             try box.children.put(allocator, stack.getFocus().id, .{ .widget = .{ .stack = stack }, .rect = null, .min_size = null });

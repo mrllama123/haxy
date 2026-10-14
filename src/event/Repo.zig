@@ -204,6 +204,7 @@ pub fn readByName(
     return .{ .repo = repo, .event_id = repo_id };
 }
 
+// a deleted repo reads as missing
 pub fn readById(
     comptime DB: type,
     comptime hash_kind: hash.HashKind,
@@ -214,5 +215,6 @@ pub fn readById(
     const records_cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, record_map_key)) orelse return null;
     const records = try DB.HashMap(.read_only).init(records_cursor);
     const record_cursor = try records.getCursor(hash.hashInt(hash_kind, id)) orelse return null;
-    return try evt.read(Record, DB, hash_kind, arena, try DB.HashMap(.read_only).init(record_cursor));
+    const record = try evt.read(Record, DB, hash_kind, arena, try DB.HashMap(.read_only).init(record_cursor));
+    return if (record.removed) null else record;
 }

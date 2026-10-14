@@ -489,6 +489,8 @@ fn runForkSession(
     const fork_record = (try evt.readForkById(io, allocator, &admin_arena, handler.server.users_dir, &forker_id, &fork_id)) orelse
         return writeError(sess, "patch draft not found");
     if (fork_record.removed) return writeError(sess, "patch draft not found");
+    // the url keeps the name the fork was made under, even after a rename
+    if (!std.mem.eql(u8, fork_record.event.repo_name, forker_repo.name)) return writeError(sess, "patch draft not found");
     const user = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &admin_arena, &forker_id)) orelse
         return writeError(sess, "invalid patch draft");
     if (user.removed) return writeError(sess, "invalid patch draft");
@@ -497,13 +499,15 @@ fn runForkSession(
 
     const target_owner_id = try evt.parseEventId(&fork_record.event.repo_user_id);
     const target_id = try evt.parseEventId(&fork_record.event.repo_id);
-    const target = (try evt.readRepoById(io, allocator, &admin_arena, handler.server.users_dir, &target_owner_id, &target_id, forker_id)) orelse
-        return writeError(sess, "repo not found");
-    // patches that are off take their drafts with them
-    const patch_role = target.repo.event.patch_role orelse return writeError(sess, "patch draft not found");
-    if (service == .receive_pack) {
-        const role = target.role orelse return writeError(sess, "repo not found");
-        if (!role.atLeast(patch_role)) return writeError(sess, "unauthorized: your role in this repo may not write patches");
+    // a deleted target, or one whose owner was deleted, leaves the fork fetchable but not pushable
+    const target = try evt.readRepoById(io, allocator, &admin_arena, handler.server.users_dir, &target_owner_id, &target_id, forker_id);
+    if (target) |value| {
+        // patches that are off take their drafts with them
+        const patch_role = value.repo.event.patch_role orelse return writeError(sess, "patch draft not found");
+        if (service == .receive_pack) {
+            const role = value.role orelse return writeError(sess, "repo not found");
+            if (!role.atLeast(patch_role)) return writeError(sess, "unauthorized: your role in this repo may not write patches");
+        }
     }
 
     const draft_path = try fork.forkPath(allocator, handler.server.users_dir, &forker_id, &fork_id);
@@ -517,7 +521,7 @@ fn runForkSession(
             inline else => |*repo| try repo.uploadPack(io, allocator, reader, writer, .{ .protocol_version = protocol_version }, &sideband),
         }
     } else {
-        if (!std.mem.eql(u8, target.repo.event.name, forker_repo.name)) return writeError(sess, "patch draft belongs to another repo");
+        if (target == null) return writeError(sess, "the repo this patch draft targets was deleted");
         const target_path = try evt.repoPath(allocator, handler.server.users_dir, &target_owner_id, &target_id);
         defer allocator.free(target_path);
         const author: evt.CommitAuthor = .{ .name = user.event.name, .email = user.event.email };

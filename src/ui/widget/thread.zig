@@ -737,6 +737,7 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
         const thread_name = Data.thread_name;
 
         pub const Exit = enum { none, list, header };
+        // `actions` shows the tool row's buttons that change the thread, right of its links
         pub const Options = struct { actions: bool = true };
 
         scroll: wgt.Scroll(Widget),
@@ -894,7 +895,7 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                 errdefer row.deinit(allocator);
                 try inner_box.children.put(allocator, row.getFocus().id, .{ .widget = .{ .box = row }, .rect = null, .min_size = null });
             }
-            if (self.actions and !description_page and comment_page == null) {
+            if (!description_page and comment_page == null) tools: {
                 const row = self.toolRow();
                 const pa = self.session.page_arena.allocator();
 
@@ -917,6 +918,8 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                     errdefer spacer.deinit(allocator);
                     try row.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
                 }
+
+                if (!self.actions) break :tools;
 
                 if (comptime supports_merge) {
                     if (Data.canMerge(entry, self.session)) {

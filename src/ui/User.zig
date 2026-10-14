@@ -20,8 +20,10 @@ pub const page_size = 20; // how many repos one window of the repos tab shows
 
 pub const ForkItem = struct {
     id: []const u8,
-    // the target repo, whose name and access the fork shares
-    target: evt.Repo,
+    // the repo name the fork was made under
+    repo_name: []const u8,
+    // the target's access, which the fork shares, or null once the target is gone
+    access: ?evt.Repo.Access,
     title: []const u8,
 };
 
@@ -135,11 +137,16 @@ pub fn init(
 
                 // the target lives in its owner's user repo
                 const owner_id = try evt.parseEventId(&record.event.repo_user_id);
-                const target = (try evt.readRepoById(io, gpa, arena, users_dir, &owner_id, &try evt.parseEventId(&record.event.repo_id), session.userId())) orelse continue;
-                if (target.role == null) continue;
-                // patches that are off take their drafts with them
-                if (target.repo.event.patch_role == null) continue;
-                const target_repo = target.repo;
+                // a deleted target, or one whose owner was deleted, leaves the fork to its forker
+                const target = try evt.readRepoById(io, gpa, arena, users_dir, &owner_id, &try evt.parseEventId(&record.event.repo_id), session.userId());
+                if (target) |value| {
+                    if (value.role == null) continue;
+                    // patches that are off take their drafts with them
+                    if (value.repo.event.patch_role == null) continue;
+                } else {
+                    const viewer_id = session.userId() orelse continue;
+                    if (!std.mem.eql(u8, &viewer_id, &user_id)) continue;
+                }
 
                 var title: []const u8 = "(unavailable)";
                 const path = try fork.forkPath(arena.allocator(), users_dir, &user_id, &fork_id);
@@ -155,7 +162,8 @@ pub fn init(
                 } else |_| {}
                 try forks.append(arena.allocator(), .{
                     .id = try arena.allocator().dupe(u8, &fork_id_hex),
-                    .target = target_repo.event,
+                    .repo_name = record.event.repo_name,
+                    .access = if (target) |value| value.repo.event.read_access else null,
                     .title = title,
                 });
             }
@@ -237,12 +245,12 @@ pub const View = struct {
                     try items.append(aa, .{ .text = "← previous", .link = try aa.print("a:/{s}/forks/start:{d}", .{ data.user.name, data.forks_start -| page_size }) });
                 for (data.forks) |fork_item| {
                     // the fork route names the forker
-                    const identity = try aa.print("{s}:{s}", .{ data.user.name, fork_item.target.name });
+                    const identity = try aa.print("{s}:{s}", .{ data.user.name, fork_item.repo_name });
                     const route = ui.RoutablePage.forkPatchRoute(identity, fork_item.id) orelse return error.RouteTooLong;
                     try items.append(aa, .{
-                        .text = try aa.print("{s} - {s}", .{ fork_item.target.name, fork_item.title }),
+                        .text = try aa.print("{s} - {s}", .{ fork_item.repo_name, fork_item.title }),
                         .link = try aa.print("a:{s}", .{try route.toUrl(session.page_arena)}),
-                        .bottom_label = if (fork_item.target.read_access == .private) "(private)" else "",
+                        .bottom_label = if (fork_item.access) |access| if (access == .private) "(private)" else "" else "(repo deleted)",
                     });
                 }
                 if (data.forks_next_start) |next_start|

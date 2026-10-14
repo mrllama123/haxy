@@ -24,6 +24,8 @@ files: Files,
 commits: Commits,
 patch: Patches,
 diff: Diff,
+// the delete tab's form, for the forker only
+delete: ?ui.Delete,
 user_notifications: ui.UserNotifications,
 quit: Quit,
 
@@ -34,27 +36,32 @@ pub fn init(arena: *std.heap.ArenaAllocator, session: *ui.Session, route: ui.Rou
     const users_dir = session.users_dir orelse return error.NotFound;
     const haxy_moment = session.haxy_moment orelse return error.NoMoment;
     const route_fork = route.forkRoute() orelse return error.UnexpectedRoute;
-    // the route's identity names the forker and the target repo
+    // the route's identity names the forker and the repo name the fork was made under
     const identity = ui.RoutablePage.RepoIdentity.parse(route_fork.name.slice()) orelse return error.NotFound;
     const id = evt.parseEventId(route_fork.id.slice()) catch return error.NotFound;
     const gpa = arena.child_allocator;
     const forker_id = (try evt.User.readIdByName(evt.AdminDB, evt.admin_repo_opts.hash, haxy_moment, identity.owner)) orelse return error.NotFound;
     const fork_record = (try evt.readForkById(io, gpa, arena, users_dir, &forker_id, &id)) orelse return error.NotFound;
     if (fork_record.removed) return error.NotFound;
+    const forker = if (session.userId()) |user_id| std.mem.eql(u8, &user_id, &forker_id) else false;
+    if (route == .fork_delete and !forker) return error.NotFound;
     const target_id = try evt.parseEventId(&fork_record.event.repo_id);
     const owner_id = try evt.parseEventId(&fork_record.event.repo_user_id);
 
-    const target = (try evt.readRepoById(io, gpa, arena, users_dir, &owner_id, &target_id, session.userId())) orelse return error.NotFound;
+    // a deleted target, or one whose owner was deleted, leaves the fork to its forker
+    const target = try evt.readRepoById(io, gpa, arena, users_dir, &owner_id, &target_id, session.userId());
     // a draft is as readable as the repo it targets
-    const target_role = target.role orelse return error.NotFound;
-    const target_record = target.repo;
-    // patches that are off take their drafts with them
-    if (target_record.event.patch_role == null) return error.NotFound;
+    const target_role: evt.Repo.Role = if (target) |found| role: {
+        // patches that are off take their drafts with them
+        if (found.repo.event.patch_role == null) return error.NotFound;
+        break :role found.role orelse return error.NotFound;
+    } else if (forker) .read else return error.NotFound;
+    // the url keeps the name the fork was made under, even after a rename
+    if (!std.mem.eql(u8, fork_record.event.repo_name, identity.name)) return error.NotFound;
     const owner = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, haxy_moment, arena, &owner_id)) orelse return error.NotFound;
-    if (!std.mem.eql(u8, target_record.event.name, identity.name)) return error.NotFound;
 
     const aa = arena.allocator();
-    const target_identity = try aa.print("{s}:{s}", .{ owner.event.name, target_record.event.name });
+    const target_identity = try aa.print("{s}:{s}", .{ owner.event.name, if (target) |found| found.repo.event.name else identity.name });
     const id_hex = std.fmt.bytesToHex(id, .lower);
     // the fork's viewer is the target repo's
     const handle = ui.RepoHandle{
@@ -80,7 +87,7 @@ pub fn init(arena: *std.heap.ArenaAllocator, session: *ui.Session, route: ui.Rou
 
             const target_path = try evt.repoPath(aa, users_dir, &owner_id, &target_id);
             const target_source = ui.RepoSource{ .path = target_path, .repo_kind = .xit };
-            var target_repo_maybe: ?rp.Repo(.xit, repo_opts) = if (!target_record.removed)
+            var target_repo_maybe: ?rp.Repo(.xit, repo_opts) = if (target != null)
                 rp.Repo(.xit, repo_opts).open(io, arena.child_allocator, target_source.localInitOpts()) catch null
             else
                 null;
@@ -95,12 +102,13 @@ pub fn init(arena: *std.heap.ArenaAllocator, session: *ui.Session, route: ui.Rou
                 .draft = fork_record.event.stage == .draft,
                 .revision_oid = try aa.dupe(u8, &fork_oid),
                 .fork_exists = true,
-                .forker = try aa.dupe(u8, identity.owner),
+                .fork_identity = try aa.dupe(u8, identity.identity),
+                .target_deleted = target == null,
             };
             var patch_data = try Patches.detailResult(aa, target_identity, retained_entry);
 
             if (target_repo_maybe) |*target_repo| switch (fork_record.event.stage) {
-                .draft => if (try Patches.loadDraftEntry(.xit, repo_opts, arena, io, haxy_moment, fork_repo, target_repo, id, identity.owner)) |entry| {
+                .draft => if (try Patches.loadDraftEntry(.xit, repo_opts, arena, io, haxy_moment, fork_repo, target_repo, id, identity.identity)) |entry| {
                     patch_data = try Patches.detailResult(aa, target_identity, entry);
                     patch_data.repo_source = target_source;
                 },
@@ -161,7 +169,7 @@ pub fn init(arena: *std.heap.ArenaAllocator, session: *ui.Session, route: ui.Rou
             };
 
             return .{
-                .header = try Header.init(arena, target_record.event.name, identity.owner, &id_hex, requested_value),
+                .header = try Header.init(arena, try aa.dupe(u8, identity.name), identity.owner, &id_hex, requested_value),
                 .files = files,
                 .commits = commits,
                 .patch = patch_data,
@@ -170,6 +178,7 @@ pub fn init(arena: *std.heap.ArenaAllocator, session: *ui.Session, route: ui.Rou
                     .path = diff_path,
                     .window = try Diff.render(.xit, repo_opts, io, arena.child_allocator, aa, fork_repo, if (diff_base) |*base| base else null, diff_head, diff_start, diff_path),
                 },
+                .delete = if (forker) .{ .target = .{ .fork = .{ .identity = try aa.dupe(u8, identity.identity), .id = id_hex } } } else null,
                 .user_notifications = try ui.UserNotifications.init(arena, session, route.userTab()),
                 .quit = Quit.init(),
             };
@@ -187,7 +196,7 @@ pub const View = struct {
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .vert });
         errdefer box.deinit(allocator);
         {
-            var header = try Header.View.init(allocator, &data.header, data.commits.commit_count, session);
+            var header = try Header.View.init(allocator, &data.header, data.commits.commit_count, data.delete != null, session);
             errdefer header.deinit(allocator);
             try box.children.put(allocator, header.getFocus().id, .{ .widget = .{ .fork_header = header }, .rect = null, .min_size = null });
         }
@@ -214,6 +223,12 @@ pub const View = struct {
                 try stack.children.put(allocator, commits.getFocus().id, .{ .repo_commits = commits });
             }
             const identity = try session.page_arena.allocator().print("{s}:{s}", .{ data.header.forker_name, data.header.name });
+            // right after commits, as in the header
+            if (data.delete) |delete| {
+                var view = try ui.Delete.View.init(allocator, delete, session, ui.RoutablePage.forkDeleteRoute(identity, data.header.id) orelse return error.RouteTooLong);
+                errdefer view.deinit(allocator);
+                try stack.children.put(allocator, view.getFocus().id, .{ .delete_form = view });
+            }
             if (session.data.user_id != null) {
                 const route = ui.RoutablePage.forkRepoNewRoute(identity, data.header.id) orelse return error.RouteTooLong;
                 var new_repo = try ui.NewRepo.View.init(allocator, session, route);

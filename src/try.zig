@@ -937,7 +937,7 @@ pub fn main(init: std.process.Init) !void {
                 if (repo_index + 1 == repo_data.len) {
                     var target_repo = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = repo_path, .require_repo_root = true });
                     defer target_repo.deinit(io, allocator);
-                    admin_thread_ids[2] = try seedPatches(io, allocator, server_path, &repo, &target_repo, &repo_event_ids[repo_index], &user_ids[repo_data[repo_index].user_index], &admin_user_id, prng.random(), now);
+                    admin_thread_ids[2] = try seedPatches(io, allocator, server_path, &repo, &target_repo, &repo_event_ids[repo_index], repo_data[repo_index].name, &user_ids[repo_data[repo_index].user_index], &admin_user_id, prng.random(), now);
                 }
             }
         }
@@ -1242,6 +1242,7 @@ fn seedPatches(
     admin_repo: *rp.Repo(.xit, evt.admin_repo_opts),
     target_repo: *rp.Repo(.xit, .{}),
     repo_id: *const [evt.event_id_size]u8,
+    repo_name: []const u8,
     repo_user_id: *const [evt.event_id_size]u8,
     user_id: *const [evt.event_id_size]u8,
     random: std.Random,
@@ -1313,6 +1314,7 @@ fn seedPatches(
             .user_id = user_id.*,
             .repo_id = repo_id.*,
             .repo_user_id = repo_user_id.*,
+            .repo_name = repo_name,
             .title = patch.title,
             .description = patch.description,
             .labels = patch.labels,

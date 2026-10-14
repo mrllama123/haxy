@@ -80,6 +80,7 @@ pub const Widget = union(enum) {
     user_settings: ui.UserSettings.View,
     user_keys: ui.UserKeys.View,
     user_notifications: ui.UserNotifications.View,
+    delete_form: ui.Delete.View,
     footer: Footer,
 
     pub fn deinit(self: *Widget, allocator: std.mem.Allocator) void {
@@ -122,7 +123,7 @@ pub const Widget = union(enum) {
     pub fn atTop(self: *Widget, root_focus: *Focus) bool {
         return switch (self.*) {
             inline .home_about, .home_users, .user_repos, .flow_box_scroll, .new_repo, .new_user, .user_login, .user_notifications, .quit, .repo_files, .repo_commits, .diff_view, .repo_refs, .repo_issues, .repo_patches, .repo_discussions, .repo_events, .repo_undo, .repo_settings, .repo_settings_form, .repo_members, .repo_branches, .user_keys => |*view| view.atTop(),
-            inline .repo_patch_detail, .user_settings => |*view| view.atTop(root_focus),
+            inline .repo_patch_detail, .user_settings, .delete_form => |*view| view.atTop(root_focus),
             else => false,
         };
     }
@@ -1631,6 +1632,10 @@ pub const SubmitButton = struct {
         const button = &self.box.children.values()[1];
         try button.widget.text_box.setContent(allocator, label);
         button.min_size = .{ .width = label.len + 2, .height = null };
+    }
+
+    pub fn setBorder(self: *SubmitButton, border: wgt.Border) void {
+        self.box.children.values()[1].widget.text_box.options.border = border;
     }
 
     pub fn build(self: *SubmitButton, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {

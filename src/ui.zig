@@ -37,6 +37,7 @@ pub const UserSettings = @import("./ui/UserSettings.zig");
 pub const UserKeys = @import("./ui/UserKeys.zig");
 pub const UserNotifications = @import("./ui/UserNotifications.zig");
 pub const UserLogin = @import("./ui/UserLogin.zig");
+pub const Delete = @import("./ui/Delete.zig");
 pub const widget = @import("./ui/widget.zig");
 pub const Widget = widget.Widget;
 
@@ -101,11 +102,11 @@ pub const Page = union(PageKind) {
                 };
             },
             .repo => switch (route) {
-                .repo_files, .repo_commits, .repo_diff, .repo_refs, .repo_issues, .repo_patches, .repo_discussions, .repo_events, .repo_undo, .repo_settings, .repo_members, .repo_branches, .repo_repo_new, .repo_user_new, .repo_user => .{ .repo = try Repo.init(arena, session, route) },
+                .repo_files, .repo_commits, .repo_diff, .repo_refs, .repo_issues, .repo_patches, .repo_discussions, .repo_events, .repo_undo, .repo_settings, .repo_members, .repo_branches, .repo_delete, .repo_repo_new, .repo_user_new, .repo_user => .{ .repo = try Repo.init(arena, session, route) },
                 else => return error.UnexpectedRoute,
             },
             .fork => switch (route) {
-                .fork_patch, .fork_diff, .fork_files, .fork_commits, .fork_repo_new, .fork_user_new, .fork_user => .{ .fork = try Fork.init(arena, session, route) },
+                .fork_patch, .fork_diff, .fork_files, .fork_commits, .fork_delete, .fork_repo_new, .fork_user_new, .fork_user => .{ .fork = try Fork.init(arena, session, route) },
                 else => return error.UnexpectedRoute,
             },
             .not_found => .not_found,
@@ -194,11 +195,13 @@ pub const RoutablePage = union(enum) {
     repo_settings: Array(repo_route_max_len),
     repo_members: RepoMembersRoute,
     repo_branches: RepoBranchesRoute,
+    repo_delete: Array(repo_route_max_len),
     repo_user: struct { name: Array(repo_route_max_len), tab: UserTab = .{} },
     fork_patch: ForkRoute,
     fork_diff: ForkDiffRoute,
     fork_files: ForkFilesRoute,
     fork_commits: ForkCommitsRoute,
+    fork_delete: ForkRoute,
     fork_repo_new: ForkRoute,
     fork_user_new: ForkRoute,
     fork_user: struct { fork: ForkRoute, tab: UserTab = .{} },
@@ -216,7 +219,7 @@ pub const RoutablePage = union(enum) {
 
     pub const EventsView = enum { active, removed };
 
-    pub const UserView = enum { notifications, settings, keys };
+    pub const UserView = enum { notifications, settings, keys, delete };
 
     // the user tab's sub tab and the notifications window it shows
     pub const UserTab = struct {
@@ -464,6 +467,10 @@ pub const RoutablePage = union(enum) {
         return .{ .repo_branches = .{ .name = Array(repo_identity_max_len).from(identity) orelse return null } };
     }
 
+    pub fn repoDeleteRoute(identity: []const u8) ?RoutablePage {
+        return .{ .repo_delete = Array(repo_route_max_len).from(identity) orelse return null };
+    }
+
     pub fn repoUndoRoute(identity: []const u8, index: ?u64) ?RoutablePage {
         return .{ .repo_undo = .{ .name = Array(repo_identity_max_len).from(identity) orelse return null, .index = index } };
     }
@@ -620,6 +627,10 @@ pub const RoutablePage = union(enum) {
             .oid = Array(ref_route_max_len).from(oid) orelse return null,
             .message = true,
         } };
+    }
+
+    pub fn forkDeleteRoute(identity: []const u8, id: []const u8) ?RoutablePage {
+        return .{ .fork_delete = initForkRoute(identity, id) orelse return null };
     }
 
     pub fn forkRepoNewRoute(identity: []const u8, id: []const u8) ?RoutablePage {
@@ -1287,6 +1298,7 @@ pub const RoutablePage = union(enum) {
                 if (b.branch.len != 0) try out.writer.print("/" ++ branch_seg ++ "{s}", .{b.branch.slice()});
                 break :blk out.written();
             },
+            .repo_delete => |name| try arena.allocator().print("{s}/repo/delete", .{try repoUrlPrefix(arena, name.slice())}),
             .repo_user => |u| try userTabUrl(arena, try repoUrlPrefix(arena, u.name.slice()), u.tab),
             .fork_patch => |f| try arena.allocator().print("/{s}+{s}", .{ f.name.slice(), f.id.slice() }),
             .fork_diff => |d| blk: {
@@ -1313,6 +1325,7 @@ pub const RoutablePage = union(enum) {
                 if (c.message) try out.writer.print("/" ++ message_seg, .{});
                 break :blk out.written();
             },
+            .fork_delete => |f| try arena.allocator().print("/{s}+{s}/delete", .{ f.name.slice(), f.id.slice() }),
             .fork_repo_new => |f| try arena.allocator().print("/{s}+{s}/repo/new", .{ f.name.slice(), f.id.slice() }),
             .fork_user_new => |f| try arena.allocator().print("/{s}+{s}/user/new", .{ f.name.slice(), f.id.slice() }),
             .fork_user => |u| try userTabUrl(arena, try arena.allocator().print("/{s}+{s}", .{ u.fork.name.slice(), u.fork.id.slice() }), u.tab),
@@ -1323,6 +1336,7 @@ pub const RoutablePage = union(enum) {
     fn userTabUrl(arena: *std.heap.ArenaAllocator, prefix: []const u8, tab: UserTab) ![]const u8 {
         return switch (tab.view) {
             .settings => try arena.allocator().print("{s}/user/settings", .{prefix}),
+            .delete => try arena.allocator().print("{s}/user/delete", .{prefix}),
             .keys => blk: {
                 var out: std.Io.Writer.Allocating = .init(arena.allocator());
                 try out.writer.print("{s}/user/keys", .{prefix});
@@ -1380,6 +1394,7 @@ pub const RoutablePage = union(enum) {
                     return if (oid.len != 0) forkCommitMessageRoute(identity, id, oid) else null;
                 return if (segments.rest().len == 0) forkCommitsRoute(identity, id, oid) else null;
             }
+            if (std.mem.eql(u8, tab, "delete")) return if (segments.next() == null) forkDeleteRoute(identity, id) else null;
             if (std.mem.eql(u8, tab, "repo")) return if (isNewTail(&segments)) forkRepoNewRoute(identity, id) else null;
             if (std.mem.eql(u8, tab, "user")) return switch (userTail(&segments) orelse return null) {
                 .new => forkUserNewRoute(identity, id),
@@ -1468,7 +1483,7 @@ pub const RoutablePage = union(enum) {
             .repo_members => |*r| r.name.slice(),
             .repo_branches => |*b| b.name.slice(),
             .repo_user => |*u| u.name.slice(),
-            .repo_settings, .repo_repo_new, .repo_user_new => |*name| name.slice(),
+            .repo_settings, .repo_delete, .repo_repo_new, .repo_user_new => |*name| name.slice(),
             else => null,
         };
     }
@@ -1479,6 +1494,7 @@ pub const RoutablePage = union(enum) {
             .fork_diff => |*d| &d.fork,
             .fork_files => |*f| &f.fork,
             .fork_commits => |*f| &f.fork,
+            .fork_delete => |*f| f,
             .fork_repo_new => |*f| f,
             .fork_user_new => |*f| f,
             .fork_user => |*u| &u.fork,
@@ -1512,8 +1528,8 @@ pub const RoutablePage = union(enum) {
         return switch (self) {
             .home_about, .home_users, .home_repo_new, .home_user_new, .home_user => .home,
             .user_repos, .user_forks, .user_repo_new, .user_user_new, .user_user => .user,
-            .repo_files, .repo_commits, .repo_diff, .repo_refs, .repo_issues, .repo_patches, .repo_discussions, .repo_events, .repo_undo, .repo_settings, .repo_members, .repo_branches, .repo_repo_new, .repo_user_new, .repo_user => .repo,
-            .fork_patch, .fork_diff, .fork_files, .fork_commits, .fork_repo_new, .fork_user_new, .fork_user => .fork,
+            .repo_files, .repo_commits, .repo_diff, .repo_refs, .repo_issues, .repo_patches, .repo_discussions, .repo_events, .repo_undo, .repo_settings, .repo_members, .repo_branches, .repo_delete, .repo_repo_new, .repo_user_new, .repo_user => .repo,
+            .fork_patch, .fork_diff, .fork_files, .fork_commits, .fork_delete, .fork_repo_new, .fork_user_new, .fork_user => .fork,
             .not_found => .not_found,
         };
     }
@@ -1535,13 +1551,14 @@ pub const RoutablePage = union(enum) {
     }
 
     // the tail after a page's "user": none or "notifications" with an optional
-    // "start:<n>", "settings", "keys" with an optional "key:<fingerprint>" and
+    // "start:<n>", "settings", "delete", "keys" with an optional "key:<fingerprint>" and
     // removal confirmation, or "new"
     fn userTail(segments: *std.mem.SplitIterator(u8, .scalar)) ?union(enum) { new, tab: UserTab } {
         const word = segments.next() orelse return .{ .tab = .{} };
         if (std.mem.eql(u8, word, "new")) return if (segments.next() == null) .new else null;
         return switch (std.meta.stringToEnum(UserView, word) orelse return null) {
             .settings => if (segments.next() == null) .{ .tab = .{ .view = .settings } } else null,
+            .delete => if (segments.next() == null) .{ .tab = .{ .view = .delete } } else null,
             .keys => .{ .tab = keysTab(segments) orelse return null },
             .notifications => .{ .tab = .{ .start = listStart(segments) orelse return null } },
         };
@@ -1618,6 +1635,10 @@ pub const RoutablePage = union(enum) {
                 var route = repoBranchesRoute(pair) orelse return null;
                 if (params.values.get(.branch)) |branch| route.repo_branches.branch = Array(ref_route_max_len).from(branch) orelse return null;
                 return route;
+            }
+            if (std.mem.eql(u8, word, "delete")) {
+                _ = segments.next();
+                return if (segments.next() == null) repoDeleteRoute(pair) else null;
             }
             return if (isNewTail(&segments)) .{ .repo_repo_new = Array(repo_route_max_len).from(pair) orelse return null } else null;
         }
@@ -1936,6 +1957,7 @@ pub const RoutablePage = union(enum) {
                 a_r.confirm == b.repo_members.confirm,
             .repo_branches => |a_b| std.mem.eql(u8, a_b.name.slice(), b.repo_branches.name.slice()) and
                 std.mem.eql(u8, a_b.branch.slice(), b.repo_branches.branch.slice()),
+            .repo_delete => |a_name| std.mem.eql(u8, a_name.slice(), b.repo_delete.slice()),
             .repo_user => |a_u| std.mem.eql(u8, a_u.name.slice(), b.repo_user.name.slice()) and a_u.tab.eql(b.repo_user.tab),
             .fork_patch => |a_f| std.mem.eql(u8, a_f.name.slice(), b.fork_patch.name.slice()) and std.mem.eql(u8, a_f.id.slice(), b.fork_patch.id.slice()),
             .fork_diff => |a_d| std.mem.eql(u8, a_d.fork.name.slice(), b.fork_diff.fork.name.slice()) and
@@ -1953,6 +1975,7 @@ pub const RoutablePage = union(enum) {
                 std.mem.eql(u8, a_c.fork.id.slice(), b.fork_commits.fork.id.slice()) and
                 std.mem.eql(u8, a_c.oid.slice(), b.fork_commits.oid.slice()) and
                 a_c.message == b.fork_commits.message,
+            .fork_delete => |a_f| std.mem.eql(u8, a_f.name.slice(), b.fork_delete.name.slice()) and std.mem.eql(u8, a_f.id.slice(), b.fork_delete.id.slice()),
             .fork_repo_new => |a_f| std.mem.eql(u8, a_f.name.slice(), b.fork_repo_new.name.slice()) and std.mem.eql(u8, a_f.id.slice(), b.fork_repo_new.id.slice()),
             .fork_user_new => |a_f| std.mem.eql(u8, a_f.name.slice(), b.fork_user_new.name.slice()) and std.mem.eql(u8, a_f.id.slice(), b.fork_user_new.id.slice()),
             .fork_user => |a_u| std.mem.eql(u8, a_u.fork.name.slice(), b.fork_user.fork.name.slice()) and
@@ -2405,6 +2428,8 @@ pub const Session = struct {
 
         pub const AssignmentFailure = enum { not_found, not_an_email, already_assigned };
 
+        pub const DeleteFailure = enum { wrong_confirm, wrong_password };
+
         pub const KeyFailure = enum {
             invalid,
             unsupported,
@@ -2499,6 +2524,13 @@ pub const Session = struct {
         assignment: struct {
             failure: AssignmentFailure,
             text: []const u8,
+        },
+        delete: struct {
+            failure: DeleteFailure,
+            // a page can hold two delete forms, so this names the failed one
+            target: std.meta.Tag(Delete.Target),
+            // the password is never retained
+            confirm: []const u8,
         },
         issue: struct {
             failure: ThreadFailure,
