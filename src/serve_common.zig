@@ -45,7 +45,8 @@ pub fn logError(io: std.Io, err: *std.Io.Writer, comptime fmt: []const u8, args:
 
 // accept connections forever, spawning `handleConn(context, stream)` as a task
 // for each. the handler owns the stream (it closes it). `name` labels accept
-// errors in the log. shared by the http, ssh, and web ui listeners.
+// errors in the log. shared by the ssh and web ui listeners. concurrent, since
+// async runs inline once the cpu-sized pool is busy.
 pub fn runListener(
     io: std.Io,
     net_server: *std.Io.net.Server,
@@ -81,17 +82,22 @@ pub fn runListener(
                     logError(self.io, self.err, "{s} accept failed: {s}\n", .{ self.name, @errorName(accept_err) });
                     continue;
                 };
-                self.tasks.async(self.io, Conn.run, .{Conn{ .context = self.context, .stream = stream }});
+                self.tasks.concurrent(self.io, Conn.run, .{Conn{ .context = self.context, .stream = stream }}) catch |spawn_err| {
+                    logError(self.io, self.err, "{s} connection spawn failed: {s}\n", .{ self.name, @errorName(spawn_err) });
+                    stream.close(self.io);
+                };
             }
         }
     };
 
-    tasks.async(io, Listener.run, .{Listener{
+    tasks.concurrent(io, Listener.run, .{Listener{
         .io = io,
         .net_server = net_server,
         .tasks = tasks,
         .err = err,
         .name = name,
         .context = context,
-    }});
+    }}) catch |spawn_err| {
+        logError(io, err, "{s}: listener spawn failed: {s}\n", .{ name, @errorName(spawn_err) });
+    };
 }
