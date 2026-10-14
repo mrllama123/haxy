@@ -132,7 +132,7 @@ fn copyTarget(
         try target_repo.core.db_file.lock(io, .shared);
         defer target_repo.core.db_file.unlock(io);
 
-        // TODO: use reflink here when the filesystem supports it
+        // file to file streaming uses copy_file_range, which reflinks where the filesystem can
         const destination = try fork_repo_dir.createFile(io, "db", .{ .exclusive = true, .read = true });
         defer destination.close(io);
         var read_buffer: [64 * 1024]u8 = undefined;
