@@ -53,7 +53,35 @@ pub fn initAdminRepo(io: std.Io, allocator: std.mem.Allocator, path: []const u8)
         try file.writeStreamingAll(io, "# HAXY\n\nWelcome to your Haxy instance!\n\nEdit `admin/ABOUT.md` in the server dir to change what this page says.");
     }
     try repo.add(io, allocator, &.{admin_about_path});
-    _ = try repo.commit(io, allocator, .{ .author = "haxy <haxy@localhost>", .message = "init" });
+    const init_oid_hex = try repo.commit(io, allocator, .{ .author = "haxy <haxy@localhost>", .message = "init" });
+
+    // an empty haxy state on the init commit, so pages render before the first
+    // event. that event's root commit is unrelated to init, so consume treats
+    // it as rebased to the beginning and discards this state.
+    {
+        var init_oid: [hash.byteLen(admin_repo_opts.hash)]u8 = undefined;
+        _ = try std.fmt.hexToBytes(&init_oid, &init_oid_hex);
+
+        const Ctx = struct {
+            init_oid: *const [hash.byteLen(admin_repo_opts.hash)]u8,
+
+            pub fn run(ctx: @This(), cursor: *AdminDB.Cursor(.read_write)) !void {
+                const moment = try AdminDB.HashMap(.read_write).init(cursor.*);
+                try moment.put(hash.hashInt(admin_repo_opts.hash, last_object_id_key), .{ .bytes = ctx.init_oid });
+                const haxy_history = try AdminDB.ArrayList(.read_write).init(try moment.putCursor(hash.hashInt(admin_repo_opts.hash, history_key)));
+                const haxy_moments = try AdminDB.HashMap(.read_write).init(try haxy_history.appendCursor());
+                const haxy_moment = try AdminDB.HashMap(.read_write).init(try haxy_moments.putCursor(hash.bytesToInt(admin_repo_opts.hash, ctx.init_oid)));
+                try haxy_moment.put(hash.hashInt(admin_repo_opts.hash, moment_index_key), .{ .uint = 0 });
+            }
+        };
+
+        try repo.core.db_file.lock(io, .exclusive);
+        defer repo.core.db_file.unlock(io);
+
+        const history = try AdminDB.ArrayList(.read_write).init(repo.core.db.rootCursor());
+        try history.appendContext(.{ .slot = try history.getSlot(-1) }, Ctx{ .init_oid = &init_oid });
+    }
+
     return repo;
 }
 
@@ -1157,7 +1185,8 @@ pub fn consumeInTransaction(
                     // we have a repo event with no parent, which means it is now
                     // the very first event. all we need to do is set the haxy
                     // history list to be empty and make a new haxy_moments map
-                    // to work with.
+                    // to work with. a new admin repo's first event lands here
+                    // too, discarding the empty state initAdminRepo wrote.
 
                     try haxy_history.slice(0);
                     haxy_moments_cursor = try haxy_history.appendCursor();
