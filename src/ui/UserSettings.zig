@@ -26,10 +26,15 @@ pub fn tabLabel(session: *const ui.Session) []const u8 {
     return session.data.user_name orelse unreachable;
 }
 
-// the user tab's bottom label: the unread notification count, if any
-pub fn tabBottomLabel(session: *const ui.Session) ![]const u8 {
-    if (session.data.unread_notifs == 0) return "";
+// the unread notification count, empty while logged out
+pub fn notifCountLabel(session: *const ui.Session) ![]const u8 {
+    if (session.data.user_id == null) return "";
     return session.page_arena.allocator().print("({d})", .{session.data.unread_notifs});
+}
+
+// the user tab's bottom label: the unread count, bold while any are unread
+pub fn tabBottomLabel(session: *const ui.Session) !wgt.Span {
+    return .{ .text = try notifCountLabel(session), .style = .{ .bold = session.data.unread_notifs > 0 } };
 }
 
 pub const View = struct {

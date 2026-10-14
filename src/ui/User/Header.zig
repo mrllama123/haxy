@@ -190,7 +190,7 @@ pub const View = struct {
         {
             const label = ui.UserSettings.tabLabel(session);
             const count_label = try ui.UserSettings.tabBottomLabel(session);
-            var text_box = try wgt.TextBox.init(allocator, label, .{ .border = .single, .round_corners = true, .wrap_kind = .none, .bottom_label = .{ .text = count_label } });
+            var text_box = try wgt.TextBox.init(allocator, label, .{ .border = .single, .round_corners = true, .wrap_kind = .none, .bottom_label = count_label });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().mode = .all;
             text_box.getFocus().kind = .{ .custom = user_link };
@@ -199,7 +199,7 @@ pub const View = struct {
             try tabs_box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
-                .min_size = .{ .width = @max(label.len, count_label.len) + 2, .height = null },
+                .min_size = .{ .width = @max(label.len, count_label.text.len) + 2, .height = null },
             });
         }
 

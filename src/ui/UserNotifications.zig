@@ -112,12 +112,13 @@ pub const View = struct {
             const on_tab = std.meta.activeTag(session.data.current_page) == std.meta.activeTag(user_route);
             const routes = [_]ui.RoutablePage{ user_route.withUserTab(.{}), settings_route, keys_route, delete_route };
             for ([_]ui.RoutablePage.UserView{ .notifications, .settings, .keys, .delete }, [_][]const u8{ "notifications", "user settings", "ssh keys", "delete user" }, routes, 0..) |view, label, route, index| {
-                var tab = try wgt.TextBox.init(allocator, label, .{ .border = .hidden, .round_corners = true, .wrap_kind = .none });
+                const count_label = if (view == .notifications) try ui.UserSettings.notifCountLabel(session) else "";
+                var tab = try wgt.TextBox.init(allocator, label, .{ .border = .hidden, .round_corners = true, .wrap_kind = .none, .bottom_label = .{ .text = count_label } });
                 errdefer tab.deinit(allocator);
                 tab.getFocus().mode = .all;
                 tab.getFocus().kind = .{ .custom = try ui.inPageTabLink(session, route, on_tab and data.view == view) };
                 control_ids[index] = tab.getFocus().id;
-                try header.children.put(allocator, tab.getFocus().id, .{ .widget = .{ .text_box = tab }, .rect = null, .min_size = .{ .width = label.len + 2, .height = null } });
+                try header.children.put(allocator, tab.getFocus().id, .{ .widget = .{ .text_box = tab }, .rect = null, .min_size = .{ .width = @max(label.len, count_label.len) + 2, .height = null } });
             }
             // the spacer pushes the buttons to the right edge
             {

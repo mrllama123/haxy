@@ -168,13 +168,13 @@ pub const View = struct {
         if (session.data.host_kind == .server) {
             const label = ui.UserSettings.tabLabel(session);
             const count_label = try ui.UserSettings.tabBottomLabel(session);
-            var user_tab = try wgt.TextBox.init(allocator, label, .{ .border = .single, .round_corners = true, .wrap_kind = .none, .bottom_label = .{ .text = count_label } });
+            var user_tab = try wgt.TextBox.init(allocator, label, .{ .border = .single, .round_corners = true, .wrap_kind = .none, .bottom_label = count_label });
             errdefer user_tab.deinit(allocator);
             user_tab.getFocus().mode = .all;
             user_tab.getFocus().kind = .{ .custom = user_link };
             try tab_ids.put(allocator, user_tab.getFocus().id, {});
             if (current_tag == .fork_user) selected_tab = user_tab.getFocus().id;
-            try tabs_box.children.put(allocator, user_tab.getFocus().id, .{ .widget = .{ .text_box = user_tab }, .rect = null, .min_size = .{ .width = @max(label.len, count_label.len) + 2, .height = null } });
+            try tabs_box.children.put(allocator, user_tab.getFocus().id, .{ .widget = .{ .text_box = user_tab }, .rect = null, .min_size = .{ .width = @max(label.len, count_label.text.len) + 2, .height = null } });
         }
 
         if (session.is_terminal) {
