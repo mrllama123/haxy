@@ -231,7 +231,9 @@ const PortPolicy = enum {
 fn listen(io: std.Io, listen_address: ListenAddress, policy: PortPolicy) !std.Io.net.Server {
     const address = try std.Io.net.IpAddress.parseIp4(listen_address.host, listen_address.port);
     return switch (policy) {
-        .exact => try address.listen(io, .{}),
+        // so a restart can bind past the old process's connections in TIME_WAIT.
+        // not for fallback, where it would let a second instance share the port.
+        .exact => try address.listen(io, .{ .reuse_address = true }),
         .fallback => address.listen(io, .{}) catch |listen_err| switch (listen_err) {
             error.AddressInUse => blk: {
                 const any_port = try std.Io.net.IpAddress.parseIp4(listen_address.host, 0);
