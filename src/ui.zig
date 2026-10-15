@@ -170,6 +170,8 @@ pub const RoutablePage = union(enum) {
         comments_start: usize = 0,
         // the comment shown in the detail pane (empty = the issue thread).
         comment: Array(evt.event_id_size * 2) = .{},
+        // the attachment a remove view confirms (empty = the issue or comment).
+        attachment: Array(evt.event_id_size * 2) = .{},
     },
     repo_patches: struct {
         name: Array(repo_route_max_len),
@@ -179,6 +181,7 @@ pub const RoutablePage = union(enum) {
         view: PatchesView = .open,
         comments_start: usize = 0,
         comment: Array(evt.event_id_size * 2) = .{},
+        attachment: Array(evt.event_id_size * 2) = .{},
     },
     repo_discussions: struct {
         name: Array(repo_route_max_len),
@@ -187,6 +190,7 @@ pub const RoutablePage = union(enum) {
         view: DiscussionsView = .recent,
         comments_start: usize = 0,
         comment: Array(evt.event_id_size * 2) = .{},
+        attachment: Array(evt.event_id_size * 2) = .{},
     },
     repo_events: RepoEventsRoute,
     repo_undo: RepoUndoRoute,
@@ -243,7 +247,7 @@ pub const RoutablePage = union(enum) {
 
     // the "key:value" segments of a url tail, collected in any order
     const Params = struct {
-        const ParamKey = enum { start, line, branch, tag, object, base, patchrev, theirs, find, search, from, moment, merge, user, key };
+        const ParamKey = enum { start, line, branch, tag, object, base, patchrev, theirs, find, search, from, moment, merge, user, key, attachment };
 
         // a branch:/tag:/object: param; the value stays url-encoded
         const RefParam = struct { kind: RefOrOid, value: []const u8 };
@@ -336,6 +340,7 @@ pub const RoutablePage = union(enum) {
     const base_seg = @tagName(Params.ParamKey.base) ++ ":";
     const merge_seg = @tagName(Params.ParamKey.merge) ++ ":";
     const theirs_seg = @tagName(Params.ParamKey.theirs) ++ ":";
+    const attachment_seg = @tagName(Params.ParamKey.attachment) ++ ":";
     const user_seg = @tagName(Params.ParamKey.user) ++ ":";
     const branch_seg = @tagName(Params.ParamKey.branch) ++ ":";
     const key_seg = @tagName(Params.ParamKey.key) ++ ":";
@@ -953,18 +958,28 @@ pub const RoutablePage = union(enum) {
     }
 
     // build the confirmation route for removing a thread or comment.
-    pub fn repoThreadRemoveRoute(kind: evt.EventKind, identity: []const u8, thread_id: []const u8, comment_id: []const u8) ?RoutablePage {
+    pub fn repoThreadRemoveRoute(kind: evt.EventKind, identity: []const u8, thread_id: []const u8, comment_id: []const u8, attachment_id: []const u8) ?RoutablePage {
         var route = if (comment_id.len == 0)
             repoThreadCommentsRoute(kind, identity, thread_id, 0) orelse return null
         else
             repoThreadCommentRoute(kind, identity, thread_id, comment_id, 0) orelse return null;
+        const attachment = Array(evt.event_id_size * 2).from(attachment_id) orelse return null;
         switch (route) {
-            .repo_issues => |*thread| thread.view = .remove,
-            .repo_patches => |*thread| thread.view = .remove,
-            .repo_discussions => |*thread| thread.view = .remove,
+            inline .repo_issues, .repo_patches, .repo_discussions => |*thread| {
+                thread.view = .remove;
+                thread.attachment = attachment;
+            },
             else => unreachable,
         }
         return route;
+    }
+
+    // the attachment a thread remove route confirms, or "" for any other page
+    pub fn threadAttachment(self: *const RoutablePage) []const u8 {
+        return switch (self.*) {
+            inline .repo_issues, .repo_patches, .repo_discussions => |*thread| thread.attachment.slice(),
+            else => "",
+        };
     }
 
     // build a thread labels route.
@@ -1171,10 +1186,7 @@ pub const RoutablePage = union(enum) {
                 else
                     try arena.allocator().print("{s}/" ++ issue_seg ++ "{s}/" ++ comment_seg ++ "{s}/new", .{ prefix, i.selected.slice(), i.comment.slice() });
                 if (i.view == .edit_comment) break :blk try arena.allocator().print("{s}/" ++ issue_seg ++ "{s}/" ++ comment_seg ++ "{s}/edit", .{ prefix, i.selected.slice(), i.comment.slice() });
-                if (i.view == .remove) break :blk if (i.comment.len == 0)
-                    try arena.allocator().print("{s}/" ++ issue_seg ++ "{s}/remove", .{ prefix, i.selected.slice() })
-                else
-                    try arena.allocator().print("{s}/" ++ issue_seg ++ "{s}/" ++ comment_seg ++ "{s}/remove", .{ prefix, i.selected.slice(), i.comment.slice() });
+                if (i.view == .remove) break :blk try threadRemoveUrl(arena, prefix, issue_seg, i.selected.slice(), i.comment.slice(), i.attachment.slice());
                 if (i.view == .conflicts) break :blk if (i.selected.len == 0)
                     try arena.allocator().print("{s}/issues/conflicts", .{prefix})
                 else
@@ -1211,10 +1223,7 @@ pub const RoutablePage = union(enum) {
                 else
                     try arena.allocator().print("{s}/" ++ patch_seg ++ "{s}/" ++ comment_seg ++ "{s}/new", .{ prefix, p.selected.slice(), p.comment.slice() });
                 if (p.view == .edit_comment) break :blk try arena.allocator().print("{s}/" ++ patch_seg ++ "{s}/" ++ comment_seg ++ "{s}/edit", .{ prefix, p.selected.slice(), p.comment.slice() });
-                if (p.view == .remove) break :blk if (p.comment.len == 0)
-                    try arena.allocator().print("{s}/" ++ patch_seg ++ "{s}/remove", .{ prefix, p.selected.slice() })
-                else
-                    try arena.allocator().print("{s}/" ++ patch_seg ++ "{s}/" ++ comment_seg ++ "{s}/remove", .{ prefix, p.selected.slice(), p.comment.slice() });
+                if (p.view == .remove) break :blk try threadRemoveUrl(arena, prefix, patch_seg, p.selected.slice(), p.comment.slice(), p.attachment.slice());
                 if (p.view == .conflicts) break :blk if (p.selected.len == 0)
                     try arena.allocator().print("{s}/patches/conflicts", .{prefix})
                 else
@@ -1245,10 +1254,7 @@ pub const RoutablePage = union(enum) {
                 else
                     try arena.allocator().print("{s}/" ++ discuss_seg ++ "{s}/" ++ comment_seg ++ "{s}/new", .{ prefix, t.selected.slice(), t.comment.slice() });
                 if (t.view == .edit_comment) break :blk try arena.allocator().print("{s}/" ++ discuss_seg ++ "{s}/" ++ comment_seg ++ "{s}/edit", .{ prefix, t.selected.slice(), t.comment.slice() });
-                if (t.view == .remove) break :blk if (t.comment.len == 0)
-                    try arena.allocator().print("{s}/" ++ discuss_seg ++ "{s}/remove", .{ prefix, t.selected.slice() })
-                else
-                    try arena.allocator().print("{s}/" ++ discuss_seg ++ "{s}/" ++ comment_seg ++ "{s}/remove", .{ prefix, t.selected.slice(), t.comment.slice() });
+                if (t.view == .remove) break :blk try threadRemoveUrl(arena, prefix, discuss_seg, t.selected.slice(), t.comment.slice(), t.attachment.slice());
                 if (t.comment.len != 0) break :blk if (t.comments_start == 0)
                     try arena.allocator().print("{s}/" ++ discuss_seg ++ "{s}/" ++ comment_seg ++ "{s}", .{ prefix, t.selected.slice(), t.comment.slice() })
                 else
@@ -1448,6 +1454,17 @@ pub const RoutablePage = union(enum) {
         if (std.mem.eql(u8, path, "/")) return repoFilesRoute("", null, "", "", 0);
         if (path.len < 2 or path[0] != '/') return null;
         return repoSubRoute("", path[1..]);
+    }
+
+    // a thread remove view's url: the thread, then any comment and attachment
+    // it narrows to, then "remove"
+    fn threadRemoveUrl(arena: *std.heap.ArenaAllocator, prefix: []const u8, comptime thread_seg: []const u8, selected: []const u8, comment: []const u8, attachment: []const u8) ![]const u8 {
+        var out: std.Io.Writer.Allocating = .init(arena.allocator());
+        try out.writer.print("{s}/" ++ thread_seg ++ "{s}", .{ prefix, selected });
+        if (comment.len != 0) try out.writer.print("/" ++ comment_seg ++ "{s}", .{comment});
+        if (attachment.len != 0) try out.writer.print("/" ++ attachment_seg ++ "{s}", .{attachment});
+        try out.writer.writeAll("/remove");
+        return out.written();
     }
 
     // the url prefix for a repo route's identity: "/<identity>", or ""
@@ -1664,10 +1681,10 @@ pub const RoutablePage = union(enum) {
                     if (comment_id.len == 0) return null;
                     const word = params.scanTail(&segments) catch return null;
                     if (word) |last| {
+                        if (std.mem.eql(u8, last, "remove")) return if (params.only(&.{.attachment})) repoThreadRemoveRoute(.issue, pair, issue_id, comment_id, params.values.get(.attachment) orelse "") else null;
                         if (!params.only(&.{})) return null;
                         if (std.mem.eql(u8, last, "new")) return repoThreadCommentNewRoute(.issue, pair, issue_id, comment_id);
                         if (std.mem.eql(u8, last, "edit")) return repoThreadCommentEditRoute(.issue, pair, issue_id, comment_id);
-                        if (std.mem.eql(u8, last, "remove")) return repoThreadRemoveRoute(.issue, pair, issue_id, comment_id);
                         return null;
                     }
                     if (!params.only(&.{.start})) return null;
@@ -1678,7 +1695,7 @@ pub const RoutablePage = union(enum) {
             if (word) |tail| {
                 if (std.mem.eql(u8, tail, "new")) return if (params.only(&.{})) repoThreadCommentNewRoute(.issue, pair, issue_id, "") else null;
                 if (std.mem.eql(u8, tail, "edit")) return if (params.only(&.{})) repoThreadEditRoute(.issue, pair, issue_id) else null;
-                if (std.mem.eql(u8, tail, "remove")) return if (params.only(&.{})) repoThreadRemoveRoute(.issue, pair, issue_id, "") else null;
+                if (std.mem.eql(u8, tail, "remove")) return if (params.only(&.{.attachment})) repoThreadRemoveRoute(.issue, pair, issue_id, "", params.values.get(.attachment) orelse "") else null;
                 if (std.mem.eql(u8, tail, "description")) return if (params.only(&.{})) repoThreadDescriptionRoute(.issue, pair, issue_id) else null;
                 if (std.mem.eql(u8, tail, "resolve")) {
                     if (!params.only(&.{.theirs})) return null;
@@ -1699,10 +1716,10 @@ pub const RoutablePage = union(enum) {
                     if (comment_id.len == 0) return null;
                     const word = params.scanTail(&segments) catch return null;
                     if (word) |last| {
+                        if (std.mem.eql(u8, last, "remove")) return if (params.only(&.{.attachment})) repoThreadRemoveRoute(.patch, pair, patch_id, comment_id, params.values.get(.attachment) orelse "") else null;
                         if (!params.only(&.{})) return null;
                         if (std.mem.eql(u8, last, "new")) return repoThreadCommentNewRoute(.patch, pair, patch_id, comment_id);
                         if (std.mem.eql(u8, last, "edit")) return repoThreadCommentEditRoute(.patch, pair, patch_id, comment_id);
-                        if (std.mem.eql(u8, last, "remove")) return repoThreadRemoveRoute(.patch, pair, patch_id, comment_id);
                         return null;
                     }
                     if (!params.only(&.{.start})) return null;
@@ -1715,7 +1732,7 @@ pub const RoutablePage = union(enum) {
                 if (std.mem.eql(u8, tail, "edit")) return if (params.only(&.{})) repoThreadEditRoute(.patch, pair, patch_id) else null;
                 if (std.mem.eql(u8, tail, "publish")) return if (params.only(&.{})) repoPatchPublishRoute(pair, patch_id) else null;
                 if (std.mem.eql(u8, tail, "merge")) return if (params.only(&.{})) repoPatchMergeRoute(pair, patch_id) else null;
-                if (std.mem.eql(u8, tail, "remove")) return if (params.only(&.{})) repoThreadRemoveRoute(.patch, pair, patch_id, "") else null;
+                if (std.mem.eql(u8, tail, "remove")) return if (params.only(&.{.attachment})) repoThreadRemoveRoute(.patch, pair, patch_id, "", params.values.get(.attachment) orelse "") else null;
                 if (std.mem.eql(u8, tail, "description")) return if (params.only(&.{})) repoThreadDescriptionRoute(.patch, pair, patch_id) else null;
                 if (std.mem.eql(u8, tail, "resolve")) {
                     if (!params.only(&.{.theirs})) return null;
@@ -1736,10 +1753,10 @@ pub const RoutablePage = union(enum) {
                     if (comment_id.len == 0) return null;
                     const word = params.scanTail(&segments) catch return null;
                     if (word) |last| {
+                        if (std.mem.eql(u8, last, "remove")) return if (params.only(&.{.attachment})) repoThreadRemoveRoute(.discuss, pair, discussion_id, comment_id, params.values.get(.attachment) orelse "") else null;
                         if (!params.only(&.{})) return null;
                         if (std.mem.eql(u8, last, "new")) return repoThreadCommentNewRoute(.discuss, pair, discussion_id, comment_id);
                         if (std.mem.eql(u8, last, "edit")) return repoThreadCommentEditRoute(.discuss, pair, discussion_id, comment_id);
-                        if (std.mem.eql(u8, last, "remove")) return repoThreadRemoveRoute(.discuss, pair, discussion_id, comment_id);
                         return null;
                     }
                     if (!params.only(&.{.start})) return null;
@@ -1750,7 +1767,7 @@ pub const RoutablePage = union(enum) {
             if (word) |tail| {
                 if (std.mem.eql(u8, tail, "new")) return if (params.only(&.{})) repoThreadCommentNewRoute(.discuss, pair, discussion_id, "") else null;
                 if (std.mem.eql(u8, tail, "edit")) return if (params.only(&.{})) repoThreadEditRoute(.discuss, pair, discussion_id) else null;
-                if (std.mem.eql(u8, tail, "remove")) return if (params.only(&.{})) repoThreadRemoveRoute(.discuss, pair, discussion_id, "") else null;
+                if (std.mem.eql(u8, tail, "remove")) return if (params.only(&.{.attachment})) repoThreadRemoveRoute(.discuss, pair, discussion_id, "", params.values.get(.attachment) orelse "") else null;
                 if (std.mem.eql(u8, tail, "description")) return if (params.only(&.{})) repoThreadDescriptionRoute(.discuss, pair, discussion_id) else null;
                 return null;
             }

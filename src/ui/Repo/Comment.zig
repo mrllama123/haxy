@@ -352,7 +352,7 @@ fn commentEditRoute(kind: evt.EventKind, identity: []const u8, thread_id: []cons
 }
 
 fn removeRoute(kind: evt.EventKind, identity: []const u8, thread_id: []const u8, comment_id: []const u8) ?ui.RoutablePage {
-    return ui.RoutablePage.repoThreadRemoveRoute(kind, identity, thread_id, comment_id);
+    return ui.RoutablePage.repoThreadRemoveRoute(kind, identity, thread_id, comment_id, "");
 }
 
 pub fn linkBox(allocator: std.mem.Allocator, session: *ui.Session, text: []const u8, route: ui.RoutablePage) !wgt.TextBox {

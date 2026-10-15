@@ -414,7 +414,7 @@ pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *con
             .edit => ui.RoutablePage.repoThreadEditRoute(.issue, data.identity, data.selected_id) orelse return error.RouteTooLong,
             .new_comment => ui.RoutablePage.repoThreadCommentNewRoute(.issue, data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
             .edit_comment => ui.RoutablePage.repoThreadCommentEditRoute(.issue, data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
-            .remove => ui.RoutablePage.repoThreadRemoveRoute(.issue, data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
+            .remove => ui.RoutablePage.repoThreadRemoveRoute(.issue, data.identity, data.selected_id, data.comment_id, "") orelse return error.RouteTooLong,
             .resolve => ui.RoutablePage.repoIssuesResolveRoute(data.identity, data.selected_id, data.theirs_picks) orelse return error.RouteTooLong,
             else => ui.RoutablePage.repoThreadNewRoute(.issue, data.identity) orelse return error.RouteTooLong,
         };

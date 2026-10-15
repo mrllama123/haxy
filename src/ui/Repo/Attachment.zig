@@ -65,11 +65,11 @@ pub fn appendRows(
         tb.getFocus().kind = .{ .custom = try pa.print("{s}{s}", .{ ui.raw_link_prefix, try url(session.page_arena, identity, &entry.id) }) };
         try row.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
 
-        row.getFocus().kind = .{ .custom = try pa.print("form:{s}/attachment:{s}/remove", .{ target_url, &entry.id }) };
+        // the ✕ opens a page confirming the removal
         var remove = try wgt.TextBox.init(allocator, "✕", .{ .border = .single, .round_corners = true, .wrap_kind = .none });
         errdefer remove.deinit(allocator);
         remove.getFocus().mode = .all;
-        remove.getFocus().kind = .{ .custom = "submit" };
+        remove.getFocus().kind = .{ .custom = try pa.print("a:{s}/attachment:{s}/remove", .{ target_url, &entry.id }) };
         try row.children.put(allocator, remove.getFocus().id, .{ .widget = .{ .text_box = remove }, .rect = null, .min_size = .{ .width = 3, .height = null } });
 
         row.getFocus().child_id = row.children.keys()[0];
@@ -77,22 +77,15 @@ pub fn appendRows(
     }
 }
 
-// the attachment id carried by a removable row
-pub fn removeId(row: *wgt.Box(ui.Widget)) ?[evt.event_id_size]u8 {
-    const prefix = "form:";
-    const infix = "/attachment:";
-    const suffix = "/remove";
-    const action = switch (row.getFocus().kind) {
+// whether a row is an attachment's, by the remove link on its ✕
+pub fn isRow(row: *wgt.Box(ui.Widget)) bool {
+    const last = row.children.values()[row.children.count() - 1].widget;
+    if (last != .text_box) return false;
+    const link = switch (last.text_box.focus.kind) {
         .custom => |custom| custom,
-        else => return null,
+        else => return false,
     };
-    if (!std.mem.startsWith(u8, action, prefix) or !std.mem.endsWith(u8, action, suffix)) return null;
-    const at = std.mem.lastIndexOf(u8, action, infix) orelse return null;
-    const id = action[at + infix.len .. action.len - suffix.len];
-    if (id.len != evt.event_id_size * 2) return null;
-    var bytes: [evt.event_id_size]u8 = undefined;
-    _ = std.fmt.hexToBytes(&bytes, id) catch return null;
-    return bytes;
+    return std.mem.startsWith(u8, link, "a:") and std.mem.indexOf(u8, link, "/attachment:") != null and std.mem.endsWith(u8, link, "/remove");
 }
 
 // the url an attachment's bytes are served from

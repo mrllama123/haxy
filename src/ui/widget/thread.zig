@@ -933,7 +933,7 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                     try addToolButton(allocator, row, "publish", "", try pa.print("a:{s}", .{try route.toUrl(self.session.page_arena)}));
                     const edit_route = ui.RoutablePage.repoThreadEditRoute(kind, self.data.identity, entry.id) orelse return error.RouteTooLong;
                     try addToolButton(allocator, row, "edit", "", try pa.print("a:{s}", .{try edit_route.toUrl(self.session.page_arena)}));
-                    const remove_route = ui.RoutablePage.repoThreadRemoveRoute(kind, self.data.identity, entry.id, "") orelse return error.RouteTooLong;
+                    const remove_route = ui.RoutablePage.repoThreadRemoveRoute(kind, self.data.identity, entry.id, "", "") orelse return error.RouteTooLong;
                     try addToolButton(allocator, row, "✕", "", try pa.print("a:{s}", .{try remove_route.toUrl(self.session.page_arena)}));
                 } else {
                     if (!self.session.is_terminal and !entryConflicted(entry)) {
@@ -974,7 +974,7 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                         try addToolButton(allocator, row, "edit", "", try pa.print("a:{s}", .{try route.toUrl(self.session.page_arena)}));
                     }
 
-                    const route = ui.RoutablePage.repoThreadRemoveRoute(kind, self.data.identity, entry.id, "") orelse return error.RouteTooLong;
+                    const route = ui.RoutablePage.repoThreadRemoveRoute(kind, self.data.identity, entry.id, "", "") orelse return error.RouteTooLong;
                     try addToolButton(allocator, row, "✕", "", try pa.print("a:{s}", .{try route.toUrl(self.session.page_arena)}));
                 }
             }
@@ -1212,8 +1212,8 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                 },
                 .box => |*row| if (isAssigneeRow(row)) {
                     try self.assigneeInput(allocator, row, key, root_focus);
-                } else if (Attachment.removeId(row)) |attachment_id| {
-                    if (self.removableRowInput(row, key, root_focus)) try self.removeEvent(allocator, .attach, attachment_id);
+                } else if (Attachment.isRow(row)) {
+                    _ = self.removableRowInput(row, key, root_focus);
                 } else if (unassignEmail(row)) |encoded| {
                     if (self.removableRowInput(row, key, root_focus)) try self.unassign(allocator, std.Uri.percentDecodeInPlace(try self.session.page_arena.allocator().dupe(u8, encoded)));
                 } else self.commentInput(key, root_focus),
@@ -1956,15 +1956,17 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             if (session.data.host_kind == .local or data.viewer != null) {
                 if (confirmation(data.view)) |confirmation_kind| {
                     const aa = session.page_arena.allocator();
+                    // an attachment's ✕ links here with the attachment in the route
+                    const attachment_id = session.data.current_page.threadAttachment();
                     const route = switch (confirmation_kind) {
-                        .remove => ui.RoutablePage.repoThreadRemoveRoute(kind, data.identity, data.selected_id, data.comment_id),
+                        .remove => ui.RoutablePage.repoThreadRemoveRoute(kind, data.identity, data.selected_id, data.comment_id, attachment_id),
                         .publish => publishRoute(data.identity, data.selected_id),
                         .merge => mergeRoute(data.identity, data.selected_id),
                     } orelse return error.RouteTooLong;
                     const page_url = try route.toUrl(session.page_arena);
                     const action = try aa.print("form:{s}", .{page_url});
-                    const event_name = if (data.comment_id.len == 0) thread_name else "comment";
-                    var label_buf: ["remove ".len + @max(thread_name.len, "comment".len)]u8 = undefined;
+                    const event_name = if (attachment_id.len != 0) "attachment" else if (data.comment_id.len == 0) thread_name else "comment";
+                    var label_buf: ["remove ".len + @max(thread_name.len, "attachment".len)]u8 = undefined;
                     var buttons: [2]widget.ConfirmationButton = undefined;
                     buttons[0] = .{ .label = switch (confirmation_kind) {
                         .remove => try std.fmt.bufPrint(&label_buf, "remove {s}", .{event_name}),
@@ -3286,6 +3288,8 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         }
 
         fn submitRemove(self: *This, allocator: std.mem.Allocator) !void {
+            const attachment_id = self.session.data.current_page.threadAttachment();
+            if (attachment_id.len != 0) return self.removeEvent(allocator, .attach, evt.parseEventId(attachment_id) catch return);
             const comment = self.data.comment_id.len != 0;
             const event_id = if (comment) self.data.comment_id else self.data.selected_id;
             const id = evt.parseEventId(event_id) catch return;
