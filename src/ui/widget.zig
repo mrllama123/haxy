@@ -2011,7 +2011,7 @@ pub const AnsiBackground = struct {
 
     // the art is faded toward the background at this opacity so foreground
     // text stays legible over it
-    pub const art_opacity = 25; // percent
+    pub const art_opacity = 15; // percent
 
     // the art parser only emits truecolor, so a palette color never occurs
     fn artRgb(color: ?Grid.Color) ?Grid.Color.Rgb {
