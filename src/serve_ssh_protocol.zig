@@ -26,7 +26,8 @@
 //!   cipher:    chacha20-poly1305@openssh.com (RFC 4253 + openssh extension)
 //!   MAC:       none (implicit in AEAD)
 //!   compress:  none
-//!   user auth: publickey + ssh-ed25519, rsa-sha2-512, rsa-sha2-256
+//!   user auth: publickey + ssh-ed25519, rsa-sha2-512, rsa-sha2-256,
+//!              ecdsa-sha2-nistp256, ecdsa-sha2-nistp384 (RFC 5656)
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -35,6 +36,7 @@ const X25519 = std.crypto.dh.X25519;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const Sha512 = std.crypto.hash.sha2.Sha512;
 const rsa = std.crypto.Certificate.rsa;
+const ecdsa = std.crypto.sign.ecdsa;
 const ChaCha20 = std.crypto.stream.chacha.ChaCha20With64BitNonce;
 const Poly1305 = std.crypto.onetimeauth.Poly1305;
 
@@ -1045,7 +1047,7 @@ const MLKem768 = std.crypto.kem.ml_kem.MLKem768;
 const hybrid_client_blob_len = MLKem768.PublicKey.encoded_length + X25519.public_length; // 1216
 const hybrid_server_blob_len = MLKem768.ciphertext_length + X25519.public_length; // 1120
 pub const our_host_key_algos = [_][]const u8{"ssh-ed25519"};
-pub const our_userauth_algos = [_][]const u8{ "ssh-ed25519", "rsa-sha2-512", "rsa-sha2-256" };
+pub const our_userauth_algos = [_][]const u8{ "ssh-ed25519", "rsa-sha2-512", "rsa-sha2-256", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384" };
 pub const our_ciphers = [_][]const u8{"chacha20-poly1305@openssh.com"};
 const our_macs = [_][]const u8{}; // none — implicit in the AEAD cipher
 const our_compression = [_][]const u8{"none"};
@@ -1838,6 +1840,8 @@ fn verifyUserauthSignature(
     if (std.mem.eql(u8, algo, "ssh-ed25519")) return verifyEd25519(pubkey_blob, signature_blob, signed.items);
     if (std.mem.eql(u8, algo, "rsa-sha2-512")) return verifyRsa(Sha512, algo, pubkey_blob, signature_blob, signed.items);
     if (std.mem.eql(u8, algo, "rsa-sha2-256")) return verifyRsa(Sha256, algo, pubkey_blob, signature_blob, signed.items);
+    if (std.mem.eql(u8, algo, "ecdsa-sha2-nistp256")) return verifyEcdsa(ecdsa.EcdsaP256Sha256, "nistp256", pubkey_blob, signature_blob, signed.items);
+    if (std.mem.eql(u8, algo, "ecdsa-sha2-nistp384")) return verifyEcdsa(ecdsa.EcdsaP384Sha384, "nistp384", pubkey_blob, signature_blob, signed.items);
     return false;
 }
 
@@ -1892,6 +1896,36 @@ fn verifyRsa(comptime Hash: type, algo: []const u8, pubkey_blob: []const u8, sig
         },
         else => return false,
     }
+}
+
+fn verifyEcdsa(comptime Ecdsa: type, comptime curve: []const u8, pubkey_blob: []const u8, signature_blob: []const u8, signed: []const u8) !bool {
+    const algo = "ecdsa-sha2-" ++ curve;
+    // parse pubkey_blob: string algo || string curve || string point
+    var pubkey_reader = std.Io.Reader.fixed(pubkey_blob);
+    if (!std.mem.eql(u8, try takeString(&pubkey_reader, 64), algo)) return false;
+    if (!std.mem.eql(u8, try takeString(&pubkey_reader, 64), curve)) return false;
+    const point = try takeString(&pubkey_reader, 256);
+    // the fingerprint hashes the whole blob, so it must hold nothing else
+    if (pubkey_reader.bufferedLen() != 0) return false;
+
+    // parse signature_blob: string algo || string (mpint r || mpint s)
+    var sig_reader = std.Io.Reader.fixed(signature_blob);
+    if (!std.mem.eql(u8, try takeString(&sig_reader, 64), algo)) return false;
+    var rs_reader = std.Io.Reader.fixed(try takeString(&sig_reader, 256));
+    const r = canonicalMpintMagnitude(try takeString(&rs_reader, 128)) orelse return false;
+    const s = canonicalMpintMagnitude(try takeString(&rs_reader, 128)) orelse return false;
+    if (rs_reader.bufferedLen() != 0) return false;
+
+    // r and s become fixed-width big-endian halves of the signature
+    const half = Ecdsa.Signature.encoded_length / 2;
+    if (r.len > half or s.len > half) return false;
+    var sig_bytes: [Ecdsa.Signature.encoded_length]u8 = @splat(0);
+    @memcpy(sig_bytes[half - r.len .. half], r);
+    @memcpy(sig_bytes[2 * half - s.len ..], s);
+
+    const pk = Ecdsa.PublicKey.fromSec1(point) catch return false;
+    Ecdsa.Signature.fromBytes(sig_bytes).verify(signed, pk) catch return false;
+    return true;
 }
 
 // the unsigned bytes of a positive mpint in its shortest encoding (RFC 4251

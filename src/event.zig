@@ -2453,7 +2453,10 @@ pub fn addUserKey(
     const fingerprint = User.fingerprintOfKey(key) orelse return error.InvalidKey;
     // the key types the ssh server verifies
     const key_type = std.mem.sliceTo(key, ' ');
-    if (!std.mem.eql(u8, key_type, "ssh-ed25519") and !std.mem.eql(u8, key_type, "ssh-rsa")) return error.UnsupportedKey;
+    const supported = [_][]const u8{ "ssh-ed25519", "ssh-rsa", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384" };
+    for (supported) |name| {
+        if (std.mem.eql(u8, key_type, name)) break;
+    } else return error.UnsupportedKey;
     try writeUserKeys(io, allocator, users_dir, admin_repo, user_id, &fingerprint, key);
 }
 
