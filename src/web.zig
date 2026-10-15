@@ -170,7 +170,7 @@ fn handleRequest(
         switch (host) {
             .server => |server| {
                 // "repo/new" and "user/new" come before "new", which would claim them
-                const PostRoute = enum { login, logout, @"repo/new", @"user/new", user, addkey, removekey, delete, settings, grant, revoke, promote, demote, protect, unprotect, new, edit, remove, open, close, resolve, publish, merge, squash, attach, assign, unassign, subscribe, mute, undo };
+                const PostRoute = enum { login, logout, @"repo/new", @"user/new", user, addkey, removekey, delete, settings, grant, revoke, promote, demote, protect, unprotect, default, new, edit, remove, open, close, resolve, publish, merge, squash, attach, assign, unassign, subscribe, mute, undo };
                 inline for (@typeInfo(PostRoute).@"enum".field_names) |name| {
                     const suffix = "/" ++ name;
                     if (std.mem.endsWith(u8, path, suffix)) {
@@ -191,6 +191,7 @@ fn handleRequest(
                             .demote => handleMembers(io, request, allocator, base, host, .demote),
                             .protect => handleBranches(io, request, allocator, base, host, .protect),
                             .unprotect => handleBranches(io, request, allocator, base, host, .unprotect),
+                            .default => handleBranches(io, request, allocator, base, host, .default),
                             .new => handleNew(io, request, allocator, base, host),
                             .edit => handleEdit(io, request, allocator, base, host),
                             .remove => handleRemove(io, request, allocator, base, host),
@@ -813,9 +814,10 @@ fn handleMembers(io: std.Io, request: *std.http.Server.Request, allocator: std.m
     try request.respond("", .{ .status = .see_other, .keep_alive = false, .extra_headers = &.{.{ .name = "location", .value = location }} });
 }
 
-// protect or unprotect a branch of the repo the branches url `base` names, as
-// one of its owners, then redirect back to the list. the add form names the
-// branch in its body and the row forms in the url.
+// make a branch the default, or protect or unprotect it, in the repo the
+// branches url `base` names, as one of its owners, then redirect back to the
+// list. the default and add forms name the branch in their body and the row
+// forms in the url.
 fn handleBranches(io: std.Io, request: *std.http.Server.Request, allocator: std.mem.Allocator, base: []const u8, host: Host, action: ui.Repo.Branches.Action) !void {
     const server = switch (host) {
         .server => |server| server,
@@ -830,7 +832,7 @@ fn handleBranches(io: std.Io, request: *std.http.Server.Request, allocator: std.
     const actor = (try authorizeWrite(io, allocator, &arena, request, host, try arena.allocator().print("/{s}", .{identity}), .owner, null)) orelse return;
 
     const branch = switch (action) {
-        .protect => blk: {
+        .default, .protect => blk: {
             const body = try readFormBody(request, allocator);
             defer allocator.free(body);
             break :blk (try parseFormField(arena.allocator(), body, "name")) orelse "";
@@ -843,7 +845,7 @@ fn handleBranches(io: std.Io, request: *std.http.Server.Request, allocator: std.
         else => return err,
     };
     const location = try (ui.RoutablePage.repoBranchesRoute(identity) orelse return error.RouteTooLong).toUrl(&arena);
-    if (failure) |value| return respondFormFailure(request, allocator, server.session_store, location, .{ .repo_branches = .{ .failure = value, .name = branch } });
+    if (failure) |value| return respondFormFailure(request, allocator, server.session_store, location, .{ .repo_branches = .{ .failure = value, .name = branch, .default = action == .default } });
     try request.respond("", .{ .status = .see_other, .keep_alive = false, .extra_headers = &.{.{ .name = "location", .value = location }} });
 }
 

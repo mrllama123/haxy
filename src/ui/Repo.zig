@@ -321,6 +321,12 @@ pub fn init(
                                 const identity = try arena.allocator().dupe(u8, repo_identity.identity);
                                 // only the repo's creator may delete it, never a granted owner
                                 const creator = if (session.userId()) |user_id| std.mem.eql(u8, &user_id, &owner_id) else false;
+                                // the branch HEAD names, which the branches tab shows as the default
+                                var head_buffer: [xit.ref.MAX_REF_CONTENT_SIZE]u8 = undefined;
+                                const default_branch = if (opened.head(io, &head_buffer)) |head| switch (head) {
+                                    .ref => |ref| ref.name,
+                                    .oid => "",
+                                } else |_| "";
                                 settings = .{
                                     .identity = identity,
                                     .name = repo.event.name,
@@ -337,7 +343,7 @@ pub fn init(
                                         else => .settings,
                                     },
                                     .members = try Members.init(io, gpa, arena, session.haxy_moment orelse return error.NoMoment, session.users_dir orelse return error.NoMoment, repo_identity.identity, &owner_id, &repo_id, members_route.start, if (members_route.confirm) |action| .{ .action = action, .name = members_route.user.slice() } else null),
-                                    .branches = try Branches.init(arena, repo_identity.identity, repo.event),
+                                    .branches = try Branches.init(arena, repo_identity.identity, repo.event, default_branch),
                                     .delete = if (creator) .{ .target = .{ .repo = identity } } else null,
                                 };
                             }

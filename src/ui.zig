@@ -2551,6 +2551,8 @@ pub const Session = struct {
         repo_branches: struct {
             failure: BranchesFailure,
             name: []const u8,
+            // whether it came from the default branch form, not the protect form
+            default: bool = false,
         },
         assignment: struct {
             failure: AssignmentFailure,
