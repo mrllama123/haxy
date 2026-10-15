@@ -99,8 +99,11 @@ pub const View = struct {
             var row = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .horiz });
             errdefer row.deinit(allocator);
             {
+                // the fingerprint ssh tools print, which an ssh refusal names too
+                const fingerprint = if (evt.User.fingerprintOfKey(key)) |value| try aa.print(" {s} ", .{&value}) else "";
                 var text_input = try wgt.TextInput.init(allocator, .{
                     .top_label = .{ .text = try aa.print(" {s} ", .{keyLabel(key)}) },
+                    .bottom_label = .{ .text = fingerprint },
                     .visible_width = input_width,
                     .round_corners = true,
                     .read_only = true,

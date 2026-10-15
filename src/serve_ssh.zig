@@ -393,8 +393,8 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, exec: ss
         .allowed => |value| value,
         .create => |creator| return runCreatingPush(handler, sess, &creator, owner_repo.name, protocol_version, &reader.interface, &writer.interface),
         .denied => return switch (parsed.service) {
-            .upload_pack => writeError(sess, "unauthorized: this SSH key cannot read this repo"),
-            .receive_pack => writeError(sess, "unauthorized: this SSH key cannot push to this repo"),
+            .upload_pack => writeKeyError(handler, sess, "unauthorized: the account with this SSH key cannot read this repo"),
+            .receive_pack => writeKeyError(handler, sess, "unauthorized: the account with this SSH key cannot push to this repo"),
         },
         .not_found => return writeError(sess, "repo not found"),
     };
@@ -497,7 +497,7 @@ fn runForkSession(
         return writeError(sess, "invalid patch draft");
     if (user.removed) return writeError(sess, "invalid patch draft");
     if (service == .receive_pack and !try evt.User.holdsKey(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &admin_arena, &forker_id, &sess.fingerprint))
-        return writeError(sess, "unauthorized: this SSH key is not registered to the patch author");
+        return writeKeyError(handler, sess, "unauthorized: this SSH key is not registered to the patch author");
 
     const target_owner_id = try evt.parseEventId(&fork_record.event.repo_user_id);
     const target_id = try evt.parseEventId(&fork_record.event.repo_id);
@@ -517,7 +517,7 @@ fn runForkSession(
             const owner = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &admin_arena, &target_owner_id)) orelse unreachable;
             break :readable try authorizeRepoKey(io, &admin_arena, handler.admin_repo_path, handler.server.users_dir, owner.event.name, value.repo.event.name, .upload_pack, &sess.fingerprint) == .allowed;
         } else try evt.User.holdsKey(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &admin_arena, &forker_id, &sess.fingerprint);
-        if (!readable) return writeError(sess, "unauthorized: this SSH key cannot read this patch draft");
+        if (!readable) return writeKeyError(handler, sess, "unauthorized: the account with this SSH key cannot read this patch draft");
     }
 
     const draft_path = try fork.forkPath(allocator, handler.server.users_dir, &forker_id, &fork_id);
@@ -678,6 +678,32 @@ fn writeError(sess: *ssh.SessionCtx, comptime msg: []const u8) !void {
     const body = "ERR haxy ssh: " ++ msg;
     var packet: [body.len + 4]u8 = undefined;
     const line = try std.fmt.bufPrint(&packet, "{x:0>4}{s}", .{ packet.len, body });
+    try sess.writeBytes(line);
+    try sess.exit(1);
+}
+
+// a refusal naming the key the client presented. a key on no account gets its
+// own message, since clients send whichever key they offer first.
+fn writeKeyError(handler: *const SessionHandler, sess: *ssh.SessionCtx, comptime msg: []const u8) !void {
+    const io = sess.conn.io;
+    const allocator = sess.conn.allocator;
+    const known = known: {
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        var admin = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = handler.admin_repo_path });
+        defer admin.deinit(io, allocator);
+        const moment = try evt.currentMoment(evt.admin_repo_opts, &admin);
+        break :known (try evt.User.readIdsByFingerprint(evt.AdminDB, evt.admin_repo_opts.hash, moment, &arena, &sess.fingerprint)).len > 0;
+    };
+    if (known) return writeFingerprintError(sess, msg);
+    return writeFingerprintError(sess, "unauthorized: this SSH key isn't added to any haxy account. if you have several keys, your SSH client may be offering a different one first");
+}
+
+// an error line ending with the presented key's fingerprint
+fn writeFingerprintError(sess: *ssh.SessionCtx, comptime msg: []const u8) !void {
+    const prefix = "ERR haxy ssh: " ++ msg ++ " (key ";
+    var packet: [4 + prefix.len + ssh.fingerprint_len + 1]u8 = undefined;
+    const line = try std.fmt.bufPrint(&packet, "{x:0>4}" ++ prefix ++ "{s})", .{ packet.len, &sess.fingerprint });
     try sess.writeBytes(line);
     try sess.exit(1);
 }
