@@ -9,9 +9,9 @@
 ░██    ░██ ░██      ░██  ░██   ░██    ░██
                                                  </code></p>
 
-You're looking at Haxy, a new git forge. This is a work in progress. We're about to do for git forges what Bill Hicks did for comedy, Earth Crisis did for hardcore music, and Marvin Heemeyer did for exterior remodeling. I'm not sure what any of that means but it sounded cool. The point is, strap yourselves in...we're gonna Leeroy Jenkins our way through this!
+**Haxy is now in preview! Try it now: https://try.haxy.net/**
 
-Haxy isn't usable yet, but you can follow the devlogs starting with [the first one](https://www.youtube.com/watch?v=m7BOY1OCH_Q).
+You're looking at Haxy, a new git forge. We're about to do for git forges what Bill Hicks did for comedy, Earth Crisis did for hardcore music, and Marvin Heemeyer did for exterior remodeling. I'm not sure what any of that means but it sounded cool. The point is, strap yourselves in...we're gonna Leeroy Jenkins our way through this!
 
 ## Why another git forge?
 
