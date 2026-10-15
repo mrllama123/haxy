@@ -1999,13 +1999,12 @@ pub const RoutablePage = union(enum) {
         return a.parent() == .fork and b.parent() == .fork and !a.eql(b);
     }
 
-    // true when `a` and `b` are different users' pages, or the same user
-    // paginated to a different repos window or search. switching between a
-    // user's tabs is in-page, so only a changed `start` or search on the same
-    // list navigates.
+    // true when `a` and `b` are different users' pages, different tabs of one
+    // user's page, or the same list paginated to a different window or search.
+    // the header's tab switches are in-page `ai:` links, which never ask this.
     pub fn userPageChanged(a: RoutablePage, b: RoutablePage) bool {
         if (a.userPageName()) |a_name| if (b.userPageName()) |b_name| {
-            if (!std.mem.eql(u8, a_name, b_name)) return true;
+            if (!std.mem.eql(u8, a_name, b_name) or std.meta.activeTag(a) != std.meta.activeTag(b)) return true;
         };
         return switch (a) {
             .user_repos => |aa| switch (b) {
