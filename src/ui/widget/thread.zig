@@ -1634,8 +1634,9 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                 },
             }
 
-            const id_hex = std.fmt.bytesToHex(id, .lower);
-            const route = ui.RoutablePage.repoEventsRoute(self.data.identity, .removed, event_kind, &id_hex, null) orelse return;
+            // back to the thread, or to its list when the thread itself was removed
+            const entry = self.entry orelse return;
+            const route = listRoute(self.data.identity, entryStatus(entry), if (event_kind == kind) "" else entry.id) orelse return;
             try self.session.navigate(route);
         }
 
@@ -3321,8 +3322,9 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 },
             }
 
-            const id_hex = std.fmt.bytesToHex(id, .lower);
-            const route = ui.RoutablePage.repoEventsRoute(self.data.identity, .removed, event_kind, &id_hex, null) orelse return;
+            // back to the thread, or to its list when the thread itself was removed
+            const selected = self.data.selectedThread() orelse return;
+            const route = listRoute(self.data.identity, entryStatus(selected.*), if (event_kind == kind) "" else self.data.selected_id) orelse return;
             try self.session.navigate(route);
         }
 

@@ -1114,13 +1114,7 @@ fn handleThreadNew(
         else => unreachable,
     };
     if (!valid) {
-        const list_name: []const u8 = switch (kind) {
-            .issue => "issues",
-            .patch => "patches",
-            .discuss => "discussions",
-            else => unreachable,
-        };
-        const form_location = try allocator.print("{s}/{s}/new", .{ base, list_name });
+        const form_location = try allocator.print("{s}/{s}/new", .{ base, threadListName(kind) });
         defer allocator.free(form_location);
         if (!evt.titleValid(title)) {
             return respondThreadFormFailure(request, allocator, host, form_location, requiredTitleFeedback(kind, title, labels, description, target_branch, source_branch));
@@ -1966,14 +1960,27 @@ fn handleRemove(
         },
     }
 
-    const id = std.fmt.bytesToHex(parts.id, .lower);
-    const location = try allocator.print("{s}/event:{s}/kind:{s}", .{ parts.repo_base, &id, @tagName(parts.kind) });
+    // back to the thread a comment or attachment was on, or to the list a thread left
+    const location = if (parts.kind == parts.thread_kind)
+        try allocator.print("{s}/{s}", .{ parts.repo_base, threadListName(parts.thread_kind) })
+    else
+        try allocator.print("{s}/{s}:{s}", .{ parts.repo_base, @tagName(parts.thread_kind), &std.fmt.bytesToHex(parts.thread_id, .lower) });
     defer allocator.free(location);
     try request.respond("", .{
         .status = .see_other,
         .keep_alive = false,
         .extra_headers = &.{.{ .name = "location", .value = location }},
     });
+}
+
+// the tab listing threads of `kind`
+fn threadListName(kind: evt.EventKind) []const u8 {
+    return switch (kind) {
+        .issue => "issues",
+        .patch => "patches",
+        .discuss => "discussions",
+        else => unreachable,
+    };
 }
 
 fn respondRemoveNotFound(request: *std.http.Server.Request) !void {
